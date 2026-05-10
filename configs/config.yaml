@@ -1,0 +1,50 @@
+pinecone:
+  api_key: ""           # overridden by PINECONE_API_KEY environment variable
+  index_name: "ru22fact-evidence"
+  cloud: "aws"
+  region: "us-east-1"
+  top_k: 5
+
+ollama:
+  base_url: "http://localhost:11434"
+  model: "llama3"
+  temperature: 0.0
+  timeout_seconds: 60
+
+embeddings:
+  model_name: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+  batch_size: 32
+  device: "cuda"         # set to "cuda" for GPU acceleration ("cpu" default value)
+
+preprocessing:
+  supported_languages:
+    - "en"
+    - "uk"
+    - "ru"
+    - "zh"
+  spacy_models:
+    en: "en_core_web_sm"
+    uk: "uk_core_news_sm"
+
+claim_extraction:
+  min_claim_length: 10
+  max_claim_length: 512
+  checkworthy_threshold: 0.5
+  classifier_model: "typeform/distilbert-base-uncased-mnli"
+  ner_weight: 0.3
+  classifier_weight: 0.7
+
+verification:
+  nli_model: "cross-encoder/nli-deberta-v3-base"
+  nli_weight: 0.4
+  rag_weight: 0.6
+  thresholds:
+    disinformation: 0.3
+    confirmed: 0.7
+  disagreement_delta: 0.3
+
+logging:
+  level: "INFO"
+  log_file: "logs/app.log"
+  max_bytes: 10485760   # 10 MB
+  backup_count: 5
