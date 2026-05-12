@@ -51,6 +51,37 @@ _JSON_EXTRACT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 VALID_VERDICTS = {"SUPPORTED", "REFUTED", "INSUFFICIENT_EVIDENCE"}
 
+_FORMAT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "verdict": {
+            "type": "string",
+            "enum": ["SUPPORTED", "REFUTED", "INSUFFICIENT_EVIDENCE"],
+        },
+        "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0,
+        },
+        "reasoning": {"type": "string"},
+        "supporting_evidence_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+        "contradicting_evidence_ids": {
+            "type": "array",
+            "items": {"type": "integer"},
+        },
+    },
+    "required": [
+        "verdict",
+        "confidence",
+        "reasoning",
+        "supporting_evidence_ids",
+        "contradicting_evidence_ids",
+    ],
+}
+
 
 @dataclass
 class RAGVerdict:
@@ -131,12 +162,14 @@ class OllamaClient:
                 original_error=exc,
             ) from exc
 
-    def generate(self, prompt: str, format: str = "json") -> str:
+    def generate(self, prompt: str, fmt: dict[str, Any] | str | None = None) -> str:
         """Send a generation request to Ollama and return the response text.
 
         Args:
             prompt: The full prompt string.
-            format: Response format hint sent to Ollama (``"json"`` or ``""``).
+            fmt: Optional format constraint — either a JSON Schema dict
+                (preferred, for structured-output-capable models) or the
+                legacy string ``"json"``. Pass ``None`` to omit the field.
 
         Returns:
             Raw response text from the model.
@@ -151,8 +184,8 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
         }
-        if format:
-            payload["format"] = format
+        if fmt is not None:
+            payload["format"] = fmt
 
         try:
             response = httpx.post(
@@ -227,7 +260,7 @@ class RAGVerifier:
             evidence_passages=evidence_passages,
         )
 
-        raw = self._client.generate(prompt, format="json")
+        raw = self._client.generate(prompt, fmt=_FORMAT_SCHEMA)
         verdict = self._parse_response(raw)
         verdict.raw_response = raw
         logger.debug(
@@ -272,6 +305,15 @@ class RAGVerifier:
             RAGVerifierError: If the response cannot be parsed as valid JSON.
         """
         text = raw.strip()
+
+        # Ollama can return an empty string when the model fails to generate
+        # structured JSON (e.g. context overflow or unsupported format mode).
+        if not text:
+            return RAGVerdict(
+                verdict="INSUFFICIENT_EVIDENCE",
+                confidence=0.5,
+                reasoning="LLM returned an empty response; treating as insufficient evidence.",
+            )
 
         # Attempt 1: direct parse
         try:

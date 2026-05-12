@@ -7,7 +7,7 @@ pinecone:
 
 ollama:
   base_url: "http://localhost:11434"
-  model: "llama3"
+  model: "qwen3:14b"
   temperature: 0.0
   timeout_seconds: 60
 

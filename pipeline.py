@@ -254,20 +254,21 @@ class DisinformationDetectionPipeline:
         nli_results = self._nli_verifier.verify_batch(claim.text, evidences)
 
         # RAG verification with graceful degradation
+        from exceptions import RAGVerifierError
         from verification.rag_verifier import RAGVerdict
 
         try:
             rag_verdict = self._rag_verifier.verify(claim, evidences)
-        except OllamaConnectionError as exc:
+        except RAGVerifierError as exc:
             logger.warning(
-                "Ollama unreachable for claim '%s...'. Using neutral RAG score. Error: %s",
+                "RAG verification failed for claim '%s...'. Using neutral RAG score. Error: %s",
                 claim.text[:50],
                 exc,
             )
             rag_verdict = RAGVerdict(
                 verdict="INSUFFICIENT_EVIDENCE",
                 confidence=0.5,
-                reasoning="Ollama LLM was unavailable during verification.",
+                reasoning="RAG verification was unavailable or produced an unparseable response.",
             )
 
         # Aggregate

@@ -1,21 +1,21 @@
-# ── Virtual environment ───────────────────────────────────────────────────────
+# Virtual environment
 .venv/
 venv/
 env/
 
-# ── Python bytecode ───────────────────────────────────────────────────────────
+#  Python bytecode 
 __pycache__/
 *.py[cod]
 *.pyo
 
-# ── Distribution / packaging ──────────────────────────────────────────────────
+#  Distribution / packaging 
 dist/
 build/
 *.egg-info/
 *.egg
 MANIFEST
 
-# ── Testing & coverage ────────────────────────────────────────────────────────
+#  Testing & coverage 
 .pytest_cache/
 .coverage
 .coverage.*
@@ -24,37 +24,37 @@ coverage.xml
 *.cover
 .tox/
 
-# ── Type checking ─────────────────────────────────────────────────────────────
+#  Type checking 
 .mypy_cache/
 .dmypy.json
 dmypy.json
 .ruff_cache/
 
-# ── Logs ──────────────────────────────────────────────────────────────────────
+#  Logs 
 logs/
 *.log
 
-# ── Environment / secrets ─────────────────────────────────────────────────────
+#  Environment / secrets 
 .env
 .env.*
 !.env.example
 *.pem
 *.key
 
-# ── IDE ───────────────────────────────────────────────────────────────────────
+#  IDE 
 .idea/
 .vscode/
 *.iml
 
-# ── OS artefacts ─────────────────────────────────────────────────────────────
+#  OS artefacts 
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# ── Dataset files (large CSVs — tracked via DVC or stored externally) ─────────
+#  Dataset files (large CSVs — tracked via DVC or stored externally) 
 data/datasets/
 
-# ── HuggingFace / sentence-transformers model cache ──────────────────────────
+#  HuggingFace / sentence-transformers model cache 
 .cache/
 ~/.cache/huggingface/
 *.bin
@@ -62,10 +62,11 @@ data/datasets/
 *.ot
 *.onnx
 
-# ── Jupyter ───────────────────────────────────────────────────────────────────
+#  Jupyter 
 .ipynb_checkpoints/
 *.ipynb
 
-# ── Pinecone / Ollama local state ─────────────────────────────────────────────
+
+#  Pinecone / Ollama local state 
 pinecone_cache/
 ollama_cache/
