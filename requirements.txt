@@ -8,6 +8,9 @@ torch>=2.2.0
 # spaCy language models (install separately after package install):
 #   python -m spacy download en_core_web_sm
 #   python -m spacy download uk_core_news_sm
+#   python -m spacy download ru_core_news_sm
+#   python -m spacy download zh_core_web_sm
+# Verify with: python -m spacy info   (should list all four pipelines)
 
 # Vector Database
 pinecone>=3.2.0

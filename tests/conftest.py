@@ -21,6 +21,28 @@ from verification.nli_verifier import NLIResult
 from verification.rag_verifier import RAGVerdict
 
 
+# ─── Slow-test gating ────────────────────────────────────────────────────────
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--run-slow",
+        action="store_true",
+        default=False,
+        help="Run tests marked @pytest.mark.slow (downloads real models).",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    if config.getoption("--run-slow"):
+        return
+    skip_slow = pytest.mark.skip(reason="slow test: use --run-slow to run")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
+
+
 # ─── Settings ────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -35,15 +57,23 @@ def settings() -> MagicMock:
     s.pinecone.top_k = 3
     # Ollama
     s.ollama.base_url = "http://localhost:11434"
-    s.ollama.model = "llama3"
+    s.ollama.model = "qwen3:14b"
     s.ollama.temperature = 0.0
     s.ollama.timeout_seconds = 30
+    s.ollama.num_ctx = 8192
+    s.ollama.seed = 42
+    s.ollama.think = False
+    s.ollama.evidence_mode = "evidence_only"
     # Embeddings
-    s.embeddings.model_name = (
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
+    s.embeddings.model_name = "BAAI/bge-m3"
     s.embeddings.device = "cpu"
     s.embeddings.batch_size = 32
+    # Retrieval / indexing
+    s.retrieval.candidate_k = 20
+    s.retrieval.reranker_model = "BAAI/bge-reranker-v2-m3"
+    s.retrieval.min_relevance = 0.2
+    s.retrieval.max_passages_per_record = 2
+    s.indexing.max_passage_chars = 800
     # Preprocessing
     s.preprocessing.supported_languages = ["en", "uk"]
     s.preprocessing.spacy_models = {"en": "en_core_web_sm", "uk": "uk_core_news_sm"}
@@ -51,16 +81,20 @@ def settings() -> MagicMock:
     s.claim_extraction.min_claim_length = 10
     s.claim_extraction.max_claim_length = 512
     s.claim_extraction.checkworthy_threshold = 0.5
-    s.claim_extraction.classifier_model = "typeform/distilbert-base-uncased-mnli"
+    s.claim_extraction.classifier_model = (
+        "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+    )
     s.claim_extraction.ner_weight = 0.3
     s.claim_extraction.classifier_weight = 0.7
     # Verification
-    s.verification.nli_model = "cross-encoder/nli-deberta-v3-base"
-    s.verification.nli_weight = 0.4
-    s.verification.rag_weight = 0.6
-    s.verification.thresholds.disinformation = 0.3
-    s.verification.thresholds.confirmed = 0.7
-    s.verification.disagreement_delta = 0.3
+    s.verification.nli_model = (
+        "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+    )
+    s.verification.nli_weight = 0.3
+    s.verification.rag_weight = 0.7
+    s.verification.thresholds.disinformation = 0.35
+    s.verification.thresholds.confirmed = 0.65
+    s.verification.decisiveness_margin = 0.15
     # Logging
     s.logging.level = "DEBUG"
     s.logging.log_file = "logs/test.log"

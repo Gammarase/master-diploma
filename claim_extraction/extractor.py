@@ -21,13 +21,13 @@ __all__ = ["ClaimExtractor", "Claim"]
 
 logger = get_logger(__name__)
 
-_CHECKWORTHY_LABEL = "checkworthy factual claim"
-_CANDIDATE_LABELS = [
-    _CHECKWORTHY_LABEL,
-    "opinion or speculation",
-    "question",
-    "irrelevant",
-]
+# Zero-shot labels chosen on a multilingual probe set (RU22Fact claims vs.
+# hand-written opinions) for the mDeBERTa-xnli classifier: "news" vs "opinion"
+# ranked claims best (AUC ≈ 0.89). Its probabilities are low in absolute terms,
+# so claim_extraction.checkworthy_threshold is tuned together with them.
+_CHECKWORTHY_LABEL = "news"
+_CANDIDATE_LABELS = [_CHECKWORTHY_LABEL, "opinion"]
+_HYPOTHESIS_TEMPLATE = "This text is {}."
 
 
 @dataclass
@@ -41,6 +41,7 @@ class Claim:
         language: ISO 639-1 language code.
         entities: Named entities found in this claim.
         checkworthy_score: Combined score in [0, 1] (higher = more check-worthy).
+        date: When the claim was made, if known (free-form string).
     """
 
     text: str
@@ -49,6 +50,7 @@ class Claim:
     language: str
     entities: list[NamedEntity] = field(default_factory=list)
     checkworthy_score: float = 0.0
+    date: str | None = None
 
 
 class ClaimExtractor:
@@ -167,24 +169,30 @@ class ClaimExtractor:
             sentence: The sentence string.
             entities: Named entities extracted from the sentence.
 
+        Without a working classifier the NER signal alone (0 or 1) is used,
+        so the result stays meaningful for any configured threshold.
+
         Returns:
             Score in [0, 1].
         """
         cfg = self._settings.claim_extraction
         ner_score = 1.0 if self._ner.has_checkworthy_entities(entities) else 0.0
 
-        classifier_score = 0.5  # neutral fallback
-        if self._classifier is not None:
-            try:
-                result = self._classifier(
-                    sentence, candidate_labels=_CANDIDATE_LABELS
-                )
-                label_scores: dict[str, float] = dict(
-                    zip(result["labels"], result["scores"])
-                )
-                classifier_score = label_scores.get(_CHECKWORTHY_LABEL, 0.5)
-            except Exception as exc:
-                logger.debug("Classifier scoring failed: %s", exc)
+        if self._classifier is None:
+            return ner_score
+        try:
+            result = self._classifier(
+                sentence,
+                candidate_labels=_CANDIDATE_LABELS,
+                hypothesis_template=_HYPOTHESIS_TEMPLATE,
+            )
+            label_scores: dict[str, float] = dict(
+                zip(result["labels"], result["scores"])
+            )
+            classifier_score = label_scores[_CHECKWORTHY_LABEL]
+        except Exception as exc:
+            logger.debug("Classifier scoring failed, using NER only: %s", exc)
+            return ner_score
 
         return cfg.ner_weight * ner_score + cfg.classifier_weight * classifier_score
 

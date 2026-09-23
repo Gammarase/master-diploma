@@ -52,10 +52,11 @@ class DisinformationDetectionPipeline:
         self._settings = settings or get_settings()
         self._preprocessing = PreprocessingPipeline(self._settings)
         self._aggregator = ResultAggregator(self._settings)
-        self._explainer = Explainer()
+        self._explainer = Explainer(self._settings)
 
         # Lazily-initialized components
         self._embedder: Any | None = None
+        self._reranker: Any | None = None
         self._vector_store: Any | None = None
         self._nli_verifier: Any | None = None
         self._rag_verifier: Any | None = None
@@ -89,10 +90,17 @@ class DisinformationDetectionPipeline:
 
         self._embedder = EmbeddingModel(self._settings)
 
+        # Reranker (lazy-loaded on first query; disabled when not configured)
+        from retrieval.reranker import Reranker
+
+        self._reranker = Reranker(self._settings)
+
         # Pinecone vector store
         from retrieval.vector_store import PineconeVectorStore
 
-        self._vector_store = PineconeVectorStore(self._settings, self._embedder)
+        self._vector_store = PineconeVectorStore(
+            self._settings, self._embedder, reranker=self._reranker
+        )
         self._vector_store.connect()
 
         # NLI verifier
@@ -175,16 +183,23 @@ class DisinformationDetectionPipeline:
         return outputs
 
     def analyze_single_claim(
-        self, claim_text: str, language: str = "en"
+        self,
+        claim_text: str,
+        language: str = "en",
+        claim_date: str | None = None,
+        exclude: tuple[str, str] | None = None,
     ) -> ExplanationOutput:
         """Verify a single claim string directly, skipping extraction.
 
-        Useful for interactive use and testing when the claim text is
+        Useful for interactive use and evaluation when the claim text is
         already known.
 
         Args:
             claim_text: The claim to verify.
             language: Language code for the claim.
+            claim_date: When the claim was made, if known; shown to the LLM.
+            exclude: ``(split, dataset_id)`` of the claim's own record, so its
+                evidence is not retrieved when the claim itself is indexed.
 
         Returns:
             ExplanationOutput for the claim.
@@ -197,8 +212,9 @@ class DisinformationDetectionPipeline:
             original_sentence=claim_text,
             sentence_index=0,
             language=language,
+            date=claim_date,
         )
-        return self._process_claim(claim, PipelineConfig())
+        return self._process_claim(claim, PipelineConfig(), exclude=exclude)
 
     def health_check(self) -> dict[str, bool]:
         """Check connectivity for all external services.
@@ -230,15 +246,20 @@ class DisinformationDetectionPipeline:
         return status
 
     def _process_claim(
-        self, claim: Any, cfg: PipelineConfig
+        self,
+        claim: Any,
+        cfg: PipelineConfig,
+        exclude: tuple[str, str] | None = None,
     ) -> ExplanationOutput:
         """Run the retrieval → verification → explanation steps for one claim.
 
         Gracefully degrades to NLI-only if Ollama is unreachable.
 
         Args:
-            claim: A Claim dataclass instance.
+            claim: A Claim dataclass instance (its ``date`` reaches the LLM).
             cfg: PipelineConfig for this invocation.
+            exclude: ``(split, dataset_id)`` of a record to exclude from
+                retrieval.
 
         Returns:
             ExplanationOutput.
@@ -248,6 +269,7 @@ class DisinformationDetectionPipeline:
             claim.text,
             top_k=cfg.top_k,
             filter_language=cfg.filter_language,
+            exclude=exclude,
         )
 
         # NLI verification

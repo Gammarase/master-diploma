@@ -17,6 +17,9 @@ from typing import Any
 from exceptions import ExplainabilityError
 from logging_config import get_logger
 from verification.aggregator import (
+    REASON_CONFLICT,
+    REASON_LOW_SCORE_MARGIN,
+    REASON_NO_EVIDENCE,
     VERDICT_CONFIRMED,
     VERDICT_DISINFORMATION,
     VERDICT_UNCERTAIN,
@@ -47,6 +50,27 @@ _VERDICT_TEMPLATES = {
         "Manual review is recommended."
     ),
 }
+
+# UNCERTAIN explanations keyed by VerificationResult.uncertainty_reason.
+_UNCERTAIN_REASON_TEMPLATES = {
+    REASON_CONFLICT: (
+        "The NLI analysis and the LLM analysis point in opposite directions "
+        "(NLI score {nli:.2f}, LLM score {rag:.2f}, based on {n} evidence "
+        "passage(s)), so no firm verdict can be given. "
+        "Manual review is recommended."
+    ),
+    REASON_LOW_SCORE_MARGIN: (
+        "The evidence is too weak or mixed for a firm verdict "
+        "(overall score {score:.2f}, based on {n} evidence passage(s)). "
+        "Manual review is recommended."
+    ),
+    REASON_NO_EVIDENCE: (
+        "No sufficiently relevant evidence was found for this claim, so it "
+        "cannot be verified. Manual review is recommended."
+    ),
+}
+
+_LLM_ASSESSMENT_LABEL = "LLM assessment:"
 
 
 @dataclass
@@ -79,9 +103,16 @@ class ExplanationOutput:
 class Explainer:
     """Format VerificationResult into a structured ExplanationOutput.
 
-    This class is stateless and has no external dependencies, making it
-    trivially testable and safe to reuse across requests.
+    This class keeps no per-request state and is safe to reuse across
+    requests.
+
+    Args:
+        settings: Optional application settings, used only to report the
+            evidence mode and model names in ``processing_metadata``.
     """
+
+    def __init__(self, settings: "Settings | None" = None) -> None:  # noqa: F821
+        self._settings = settings
 
     def explain(self, verification_result: VerificationResult) -> ExplanationOutput:
         """Generate a full explanation from a VerificationResult.
@@ -115,9 +146,15 @@ class Explainer:
 
             processing_metadata: dict[str, Any] = {
                 "evidence_count": len(result.retrieved_evidences),
-                "rag_model_verdict": result.rag_verdict.verdict,
                 "nli_results_count": len(result.nli_results),
                 "component_weights": result.component_weights,
+                "effective_weights": result.effective_weights,
+                "uncertainty_reason": result.uncertainty_reason,
+                "rag_model_verdict": result.rag_verdict.verdict,
+                "rag_confidence": result.rag_verdict.confidence,
+                "rag_raw_response": result.rag_verdict.raw_response,
+                "evidence_mode": self._evidence_mode(),
+                "models": self._model_names(),
             }
 
             output = ExplanationOutput(
@@ -165,12 +202,18 @@ class Explainer:
         template = _VERDICT_TEMPLATES.get(
             result.verdict, _VERDICT_TEMPLATES[VERDICT_UNCERTAIN]
         )
-        base_explanation = template.format(n=n_evidence, score=score)
+        if result.verdict == VERDICT_UNCERTAIN:
+            template = _UNCERTAIN_REASON_TEMPLATES.get(
+                result.uncertainty_reason or "", template
+            )
+        base_explanation = template.format(
+            n=n_evidence, score=score, nli=result.nli_score, rag=result.rag_score
+        )
 
-        # Append RAG reasoning if it is non-trivial
+        # Append the LLM's reasoning, labelled so it is not read as the verdict.
         rag_reasoning = result.rag_verdict.reasoning.strip()
         if rag_reasoning and len(rag_reasoning) > 10:
-            return f"{base_explanation} {rag_reasoning}"
+            return f"{base_explanation} {_LLM_ASSESSMENT_LABEL} {rag_reasoning}"
         return base_explanation
 
     def _format_evidence_excerpts(
@@ -180,29 +223,34 @@ class Explainer:
     ) -> list[dict[str, Any]]:
         """Format evidence passages into structured excerpt records.
 
+        Dataset labels are deliberately left out: they belong to the source
+        record's claim, not to the claim being verified.
+
         Args:
             evidences: List of RetrievedEvidence from similarity search.
-            nli_results: Corresponding NLIResult objects.
+            nli_results: NLIResult objects in the same order as *evidences*.
 
         Returns:
-            List of dicts with passage index, text, relevance, stance, label.
+            List of dicts with passage index, text, relevance and stance.
         """
-        nli_map: dict[str, str] = {}
-        for nli in nli_results:
-            nli_map[nli.evidence_text[:50]] = nli.predicted_label
+        aligned = len(nli_results) == len(evidences)
+        nli_map: dict[str, str] = {
+            nli.evidence_text: nli.predicted_label for nli in nli_results
+        }
 
         excerpts: list[dict[str, Any]] = []
         for idx, ev in enumerate(evidences):
-            nli_label = nli_map.get(ev.evidence_text[:50], "unknown")
-            stance = self._nli_label_to_stance(nli_label)
+            if aligned:
+                nli_label = nli_results[idx].predicted_label
+            else:
+                nli_label = nli_map.get(ev.evidence_text, "unknown")
 
             excerpts.append(
                 {
                     "passage_index": idx,
                     "text": ev.evidence_text[:_EVIDENCE_TEXT_LIMIT],
                     "relevance_score": round(ev.score, 4),
-                    "stance": stance,
-                    "label_from_dataset": ev.label,
+                    "stance": self._nli_label_to_stance(nli_label),
                 }
             )
         return excerpts
@@ -214,17 +262,36 @@ class Explainer:
             evidences: List of RetrievedEvidence instances.
 
         Returns:
-            List of citation dicts with vector_id, claim_id, language, dataset.
+            List of citation dicts with vector_id, split, claim_id,
+            passage_index, language and dataset.
         """
         return [
             {
                 "vector_id": ev.vector_id,
-                "claim_id": getattr(ev, "claim_id", ""),
+                "split": ev.split,
+                "claim_id": ev.claim_id,
+                "passage_index": ev.passage_index,
                 "language": ev.language,
                 "dataset": "RU22Fact",
             }
             for ev in evidences
         ]
+
+    def _evidence_mode(self) -> str | None:
+        if self._settings is None:
+            return None
+        return self._settings.ollama.evidence_mode
+
+    def _model_names(self) -> dict[str, str | None]:
+        if self._settings is None:
+            return {"embeddings": None, "reranker": None, "nli": None, "llm": None}
+        s = self._settings
+        return {
+            "embeddings": s.embeddings.model_name,
+            "reranker": s.retrieval.reranker_model,
+            "nli": s.verification.nli_model,
+            "llm": s.ollama.model,
+        }
 
     def _nli_label_to_stance(self, nli_label: str) -> str:
         """Map an NLI label to a human-readable stance string.

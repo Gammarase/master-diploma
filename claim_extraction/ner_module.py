@@ -7,6 +7,7 @@ score sentences for check-worthiness based on entity type combinations.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -20,15 +21,45 @@ __all__ = ["NERModule", "NamedEntity"]
 
 logger = get_logger(__name__)
 
-# Entity types that indicate a politically/factually relevant subject
+# Entity types that indicate a politically/factually relevant subject.
+# "PER" is the person label of the uk/ru spaCy pipelines.
 _SUBJECT_TYPES: frozenset[str] = frozenset(
-    {"ORG", "GPE", "PERSON", "FAC", "NORP", "LOC", "EVENT"}
+    {"ORG", "GPE", "PERSON", "PER", "FAC", "NORP", "LOC", "EVENT"}
 )
 
 # Entity types that indicate a quantifiable or time-bound fact
 _QUANTIFIER_TYPES: frozenset[str] = frozenset(
     {"CARDINAL", "PERCENT", "QUANTITY", "DATE", "TIME", "MONEY", "ORDINAL"}
 )
+
+# Regex fallback for pipelines without numeric/date entity types
+# (uk_core_news_sm and ru_core_news_sm only emit LOC/ORG/PER).
+_MONTH_WORDS = (
+    # English ("march"/"may" omitted: also common verbs; en spaCy finds dates)
+    "january|february|april|june|july|august|september|october|"
+    "november|december|"
+    # Ukrainian: nominative, genitive, locative
+    "січень|лютий|березень|квітень|травень|червень|липень|серпень|вересень|"
+    "жовтень|листопад|грудень|"
+    "січня|лютого|березня|квітня|травня|червня|липня|серпня|вересня|жовтня|"
+    "листопада|грудня|"
+    "січні|лютому|березні|квітні|травні|червні|липні|серпні|вересні|жовтні|"
+    "листопаді|грудні|"
+    # Russian: nominative, genitive, prepositional
+    "январь|февраль|март|апрель|май|июнь|июль|август|сентябрь|октябрь|ноябрь|"
+    "декабрь|"
+    "января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|"
+    "ноября|декабря|"
+    "январе|феврале|марте|апреле|мае|июне|июле|августе|сентябре|октябре|"
+    "ноябре|декабре"
+)
+_DATE_RE = re.compile(
+    rf"\b(?:{_MONTH_WORDS})\b"
+    r"|\d{1,4}\s*[年月日号]"
+    r"|[一二三四五六七八九十]{1,3}月",
+    re.IGNORECASE,
+)
+_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 @dataclass
@@ -65,17 +96,22 @@ class NERModule:
     def extract_entities(self, doc: "Doc") -> list[NamedEntity]:
         """Extract named entities from a spaCy Doc.
 
+        When spaCy finds no numeric or date entity (always the case for the
+        uk/ru pipelines, which lack those types), regex-detected ``DATE`` and
+        ``CARDINAL`` pseudo-entities are added so the check-worthiness
+        heuristic works in every language.
+
         Args:
             doc: A processed spaCy Doc with NER annotations.
 
         Returns:
-            List of NamedEntity objects.
+            List of NamedEntity objects, ordered by position.
 
         Raises:
             ClaimExtractionError: On unexpected failure.
         """
         try:
-            return [
+            entities = [
                 NamedEntity(
                     text=ent.text,
                     label=ent.label_,
@@ -84,10 +120,35 @@ class NERModule:
                 )
                 for ent in doc.ents
             ]
+            if not any(e.label in _QUANTIFIER_TYPES for e in entities):
+                entities.extend(self._regex_quantifiers(doc.text, entities))
+                entities.sort(key=lambda e: e.start_char)
+            return entities
         except Exception as exc:
             raise ClaimExtractionError(
                 "Entity extraction failed", original_error=exc
             ) from exc
+
+    @staticmethod
+    def _regex_quantifiers(
+        text: str, existing: list[NamedEntity]
+    ) -> list[NamedEntity]:
+        """Find dates and numbers that do not overlap *existing* entities."""
+        taken = [(e.start_char, e.end_char) for e in existing]
+        found: list[NamedEntity] = []
+
+        def add(match: re.Match[str], label: str) -> None:
+            start, end = match.span()
+            if any(start < t_end and t_start < end for t_start, t_end in taken):
+                return
+            taken.append((start, end))
+            found.append(NamedEntity(match.group(), label, start, end))
+
+        for match in _DATE_RE.finditer(text):
+            add(match, "DATE")
+        for match in _NUMBER_RE.finditer(text):
+            add(match, "CARDINAL")
+        return found
 
     def has_checkworthy_entities(self, entities: list[NamedEntity]) -> bool:
         """Return True if *entities* suggest a check-worthy factual claim.

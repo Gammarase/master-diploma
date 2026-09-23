@@ -1,9 +1,9 @@
 """
 Embedding generation for the Disinformation Detection System.
 
-Uses sentence-transformers to produce dense vector representations
-of text. The default model supports English, Ukrainian, Russian, and
-Chinese — all languages present in RU22Fact.
+Uses sentence-transformers to produce dense, L2-normalised vector
+representations of text. The configured model must support English,
+Ukrainian, Russian, and Chinese — all languages present in RU22Fact.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ class EmbeddingModel:
         self._model_name: str = settings.embeddings.model_name
         self._device: str = settings.embeddings.device
         self._batch_size: int = settings.embeddings.batch_size
+        self._dimension: int | None = None
 
     def _load(self) -> Any:
         """Lazy-load the SentenceTransformer model.
@@ -55,9 +56,10 @@ class EmbeddingModel:
         if self._model is not None:
             return self._model
         try:
-            self._model = SentenceTransformer(
-                self._model_name, device=self._device
-            )
+            model = SentenceTransformer(self._model_name, device=self._device)
+            if str(self._device).startswith("cuda"):
+                model.half()
+            self._model = model
             logger.info(
                 "Loaded embedding model '%s' on device '%s'",
                 self._model_name,
@@ -86,7 +88,9 @@ class EmbeddingModel:
             raise EmbeddingError("Cannot embed empty text.")
         try:
             model = self._load()
-            vector = model.encode(text, convert_to_numpy=True)
+            vector = model.encode(
+                text, convert_to_numpy=True, normalize_embeddings=True
+            )
             return vector.tolist()
         except EmbeddingError:
             raise
@@ -115,6 +119,7 @@ class EmbeddingModel:
                 texts,
                 batch_size=self._batch_size,
                 convert_to_numpy=True,
+                normalize_embeddings=True,
                 show_progress_bar=len(texts) > self._batch_size,
             )
             return [v.tolist() for v in vectors]
@@ -138,10 +143,29 @@ class EmbeddingModel:
 
     @property
     def dimension(self) -> int:
-        """Return the embedding vector dimension.
+        """Return the dimension of vectors this model actually produces.
+
+        This is the source of truth for Pinecone index creation. When the
+        model does not report a dimension, a probe sentence is encoded.
 
         Returns:
-            Integer dimension (768 for the default multilingual model).
+            Integer dimension (1024 for BAAI/bge-m3).
+
+        Raises:
+            EmbeddingError: If the dimension cannot be determined.
         """
+        if self._dimension is not None:
+            return self._dimension
         model = self._load()
-        return model.get_sentence_embedding_dimension()
+        dim: int | None = None
+        getter = getattr(model, "get_embedding_dimension", None) or getattr(
+            model, "get_sentence_embedding_dimension", None
+        )
+        if getter is not None:
+            reported = getter()
+            if isinstance(reported, int) and reported > 0:
+                dim = reported
+        if dim is None:
+            dim = len(self.embed_single("dimension probe"))
+        self._dimension = dim
+        return dim

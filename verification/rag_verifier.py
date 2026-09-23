@@ -21,28 +21,71 @@ from retrieval.vector_store import RetrievedEvidence
 if TYPE_CHECKING:
     from claim_extraction.extractor import Claim
 
-__all__ = ["OllamaClient", "RAGVerifier", "RAGVerdict"]
+__all__ = [
+    "OllamaClient",
+    "RAGVerifier",
+    "RAGVerdict",
+    "EVIDENCE_MODE_EVIDENCE_ONLY",
+    "EVIDENCE_MODE_FACT_CHECKED",
+    "estimate_tokens",
+]
 
 logger = get_logger(__name__)
 
-RAG_PROMPT_TEMPLATE = """\
+EVIDENCE_MODE_EVIDENCE_ONLY = "evidence_only"
+EVIDENCE_MODE_FACT_CHECKED = "fact_checked_claims"
+_EVIDENCE_MODES = {EVIDENCE_MODE_EVIDENCE_ONLY, EVIDENCE_MODE_FACT_CHECKED}
+
+# Dataset labels are shown as fact-check verdicts, never as the output enum.
+_FACT_CHECK_VERDICTS = {"Supported": "TRUE", "Refuted": "FALSE", "NEI": "UNVERIFIED"}
+
+# Fraction of num_ctx the prompt may occupy; the rest is left for the answer.
+_PROMPT_BUDGET_FRACTION = 0.9
+# Conservative token estimate for mixed Latin/Cyrillic/CJK text.
+_BYTES_PER_TOKEN = 3
+# Passages shortened below this many characters are dropped instead.
+_MIN_PASSAGE_CHARS = 100
+_TRUNCATION_MARK = " …"
+
+_PROMPT_HEADER = """\
 You are a professional fact-checking assistant. \
-Your task is to verify the following claim using ONLY the provided evidence passages.
+Your task is to verify the CLAIM using ONLY the evidence passages below.
 
 CLAIM: {claim}
-
+{date_line}
 EVIDENCE PASSAGES:
 {evidence_passages}
 
-Based solely on the evidence above, provide your verdict as a valid JSON object \
-conforming EXACTLY to this schema:
-{{
-  "verdict": "<SUPPORTED|REFUTED|INSUFFICIENT_EVIDENCE>",
-  "confidence": <float between 0.0 and 1.0>,
-  "reasoning": "<1-3 sentences explaining your verdict>",
-  "supporting_evidence_ids": [<list of passage indices that support the claim>],
-  "contradicting_evidence_ids": [<list of passage indices that contradict the claim>]
-}}
+INSTRUCTIONS:
+- Ignore passages that describe different events, entities, places or time \
+periods than the claim. Such passages neither support nor contradict it.
+"""
+
+_EVIDENCE_ONLY_INSTRUCTIONS = """\
+- Judge the claim only from the text of the relevant passages.
+"""
+
+_FACT_CHECKED_INSTRUCTIONS = """\
+- Each passage belongs to a previously fact-checked claim and shows that \
+claim, its fact-check verdict (TRUE, FALSE or UNVERIFIED) and explanation.
+- Reuse a fact-check verdict only if the new CLAIM asserts the same thing as \
+the previously fact-checked claim.
+- If the new CLAIM asserts the opposite of the previously fact-checked claim, \
+invert the verdict (TRUE becomes FALSE, FALSE becomes TRUE).
+- If the previously fact-checked claim is about something else, ignore its \
+verdict and use only the evidence text.
+"""
+
+_PROMPT_FOOTER = """\
+- If the relevant passages do not settle the claim, answer INSUFFICIENT_EVIDENCE.
+
+Respond with a JSON object whose fields appear in this order:
+  "reasoning": 1-3 sentences explaining which passages matter and why \
+(write this before deciding the verdict),
+  "verdict": one of SUPPORTED, REFUTED, INSUFFICIENT_EVIDENCE,
+  "confidence": a number between 0.0 and 1.0,
+  "supporting_evidence_ids": indices of passages that support the claim,
+  "contradicting_evidence_ids": indices of passages that contradict the claim
 
 IMPORTANT: Return ONLY the JSON object. Do not include any other text, markdown, or explanation.\
 """
@@ -51,9 +94,12 @@ _JSON_EXTRACT_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 VALID_VERDICTS = {"SUPPORTED", "REFUTED", "INSUFFICIENT_EVIDENCE"}
 
+# Property order matters: Ollama's grammar-constrained decoding follows it,
+# so the model writes its reasoning before committing to a verdict.
 _FORMAT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "reasoning": {"type": "string"},
         "verdict": {
             "type": "string",
             "enum": ["SUPPORTED", "REFUTED", "INSUFFICIENT_EVIDENCE"],
@@ -63,7 +109,6 @@ _FORMAT_SCHEMA: dict[str, Any] = {
             "minimum": 0.0,
             "maximum": 1.0,
         },
-        "reasoning": {"type": "string"},
         "supporting_evidence_ids": {
             "type": "array",
             "items": {"type": "integer"},
@@ -74,13 +119,18 @@ _FORMAT_SCHEMA: dict[str, Any] = {
         },
     },
     "required": [
+        "reasoning",
         "verdict",
         "confidence",
-        "reasoning",
         "supporting_evidence_ids",
         "contradicting_evidence_ids",
     ],
 }
+
+
+def estimate_tokens(text: str) -> float:
+    """Estimate the token count of *text* as UTF-8 bytes / 3."""
+    return len(text.encode("utf-8")) / _BYTES_PER_TOKEN
 
 
 @dataclass
@@ -136,9 +186,16 @@ class OllamaClient:
     """
 
     def __init__(self, settings: "Settings") -> None:  # noqa: F821
-        self._base_url: str = settings.ollama.base_url.rstrip("/")
-        self._model: str = settings.ollama.model
-        self._timeout: int = settings.ollama.timeout_seconds
+        cfg = settings.ollama
+        self._base_url: str = cfg.base_url.rstrip("/")
+        self._model: str = cfg.model
+        self._timeout: int = cfg.timeout_seconds
+        self._options: dict[str, Any] = {
+            "temperature": cfg.temperature,
+            "num_ctx": cfg.num_ctx,
+            "seed": cfg.seed,
+        }
+        self._think: bool = bool(cfg.think)
 
     def health_check(self) -> bool:
         """Verify that the Ollama server is reachable and responsive.
@@ -165,6 +222,9 @@ class OllamaClient:
     def generate(self, prompt: str, fmt: dict[str, Any] | str | None = None) -> str:
         """Send a generation request to Ollama and return the response text.
 
+        The configured ``temperature``, ``num_ctx`` and ``seed`` are sent as
+        ``options``, and the configured ``think`` flag is sent as-is.
+
         Args:
             prompt: The full prompt string.
             fmt: Optional format constraint — either a JSON Schema dict
@@ -183,6 +243,8 @@ class OllamaClient:
             "model": self._model,
             "prompt": prompt,
             "stream": False,
+            "options": dict(self._options),
+            "think": self._think,
         }
         if fmt is not None:
             payload["format"] = fmt
@@ -220,7 +282,11 @@ class RAGVerifier:
 
     Args:
         ollama_client: Configured OllamaClient instance.
-        settings: Application settings.
+        settings: Application settings (``ollama.evidence_mode``,
+            ``ollama.num_ctx``).
+
+    Raises:
+        ValueError: If the configured evidence mode is unknown.
     """
 
     def __init__(
@@ -230,6 +296,18 @@ class RAGVerifier:
     ) -> None:
         self._client = ollama_client
         self._settings = settings
+        self._evidence_mode: str = settings.ollama.evidence_mode
+        if self._evidence_mode not in _EVIDENCE_MODES:
+            raise ValueError(
+                f"Unknown ollama.evidence_mode {self._evidence_mode!r}; "
+                f"expected one of {sorted(_EVIDENCE_MODES)}."
+            )
+        self._num_ctx: int = settings.ollama.num_ctx
+
+    @property
+    def evidence_mode(self) -> str:
+        """The configured evidence presentation mode."""
+        return self._evidence_mode
 
     def verify(
         self, claim: "Claim", evidences: list[RetrievedEvidence]
@@ -238,7 +316,7 @@ class RAGVerifier:
 
         Args:
             claim: The Claim dataclass to verify.
-            evidences: Retrieved evidence passages from Pinecone.
+            evidences: Retrieved evidence passages, highest-ranked first.
 
         Returns:
             RAGVerdict with verdict, confidence, and reasoning.
@@ -254,12 +332,7 @@ class RAGVerifier:
                 reasoning="No evidence passages were retrieved for this claim.",
             )
 
-        evidence_passages = self._format_evidence_passages(evidences)
-        prompt = RAG_PROMPT_TEMPLATE.format(
-            claim=claim.text,
-            evidence_passages=evidence_passages,
-        )
-
+        prompt = self.build_prompt(claim, evidences)
         raw = self._client.generate(prompt, fmt=_FORMAT_SCHEMA)
         verdict = self._parse_response(raw)
         verdict.raw_response = raw
@@ -271,24 +344,99 @@ class RAGVerifier:
         )
         return verdict
 
-    def _format_evidence_passages(
-        self, evidences: list[RetrievedEvidence]
+    def build_prompt(
+        self, claim: "Claim", evidences: list[RetrievedEvidence]
     ) -> str:
-        """Format evidence passages as a numbered list for the prompt.
+        """Build the prompt, shortening low-ranked passages to fit ``num_ctx``.
+
+        Passages are shortened (then dropped) from the lowest-ranked one
+        upwards until the estimated prompt size is at most 90% of
+        ``num_ctx``. The claim and instructions are never truncated.
 
         Args:
-            evidences: List of RetrievedEvidence.
+            claim: The claim being verified.
+            evidences: Retrieved passages, highest-ranked first.
 
         Returns:
-            Multi-line string with indexed passages.
+            The prompt string.
         """
-        lines: list[str] = []
-        for idx, ev in enumerate(evidences):
-            lines.append(
-                f"[{idx}] (relevance={ev.score:.2f}, label={ev.label})\n"
-                f"    {ev.evidence_text}"
+        texts = [ev.evidence_text for ev in evidences]
+        budget = _PROMPT_BUDGET_FRACTION * self._num_ctx
+        prompt = self._render(claim, evidences, texts)
+        original_estimate = estimate_tokens(prompt)
+        if original_estimate <= budget:
+            return prompt
+
+        mark_bytes = len(_TRUNCATION_MARK.encode("utf-8"))
+        while texts and estimate_tokens(prompt) > budget:
+            overflow_bytes = int(
+                (estimate_tokens(prompt) - budget) * _BYTES_PER_TOKEN
+            ) + 1
+            last = texts[-1]
+            if last.endswith(_TRUNCATION_MARK):
+                last = last[: -len(_TRUNCATION_MARK)]
+            target = len(last.encode("utf-8")) - overflow_bytes - mark_bytes
+            shortened = _truncate_utf8(last, target)
+            if len(shortened) < _MIN_PASSAGE_CHARS:
+                texts.pop()
+            else:
+                texts[-1] = shortened + _TRUNCATION_MARK
+            prompt = self._render(claim, evidences[: len(texts)], texts)
+
+        logger.warning(
+            "RAG prompt estimated at %.0f tokens exceeds %.0f (90%% of num_ctx=%d); "
+            "shortened to %.0f tokens with %d of %d passages.",
+            original_estimate,
+            budget,
+            self._num_ctx,
+            estimate_tokens(prompt),
+            len(texts),
+            len(evidences),
+        )
+        return prompt
+
+    def _render(
+        self,
+        claim: "Claim",
+        evidences: list[RetrievedEvidence],
+        texts: list[str],
+    ) -> str:
+        """Fill the prompt template for the configured evidence mode."""
+        date = getattr(claim, "date", None)
+        date_line = f"CLAIM DATE: {date}\n" if isinstance(date, str) and date else ""
+        if self._evidence_mode == EVIDENCE_MODE_FACT_CHECKED:
+            passages = self._format_fact_checked(evidences, texts)
+            instructions = _FACT_CHECKED_INSTRUCTIONS
+        else:
+            passages = self._format_evidence_only(texts)
+            instructions = _EVIDENCE_ONLY_INSTRUCTIONS
+        header = _PROMPT_HEADER.format(
+            claim=claim.text,
+            date_line=date_line,
+            evidence_passages=passages or "(none)",
+        )
+        return header + instructions + _PROMPT_FOOTER
+
+    @staticmethod
+    def _format_evidence_only(texts: list[str]) -> str:
+        """Index and text only — no labels, claims or explanations."""
+        return "\n".join(f"[{idx}] {text}" for idx, text in enumerate(texts))
+
+    @staticmethod
+    def _format_fact_checked(
+        evidences: list[RetrievedEvidence], texts: list[str]
+    ) -> str:
+        """Each passage as a previously fact-checked claim with its verdict."""
+        blocks: list[str] = []
+        for idx, (ev, text) in enumerate(zip(evidences, texts)):
+            verdict = _FACT_CHECK_VERDICTS.get(ev.label, "UNVERIFIED")
+            blocks.append(
+                f"[{idx}] Previously fact-checked claim: {ev.claim_text}\n"
+                f"    Fact-check verdict: {verdict}\n"
+                f"    Fact-check explanation: {ev.explanation}\n"
+                f"    Evidence: {text}"
             )
-        return "\n".join(lines)
+        return "\n".join(blocks)
 
     def _parse_response(self, raw: str) -> RAGVerdict:
         """Parse the raw LLM response into a RAGVerdict.
@@ -362,3 +510,10 @@ class RAGVerifier:
                 int(x) for x in data.get("contradicting_evidence_ids", [])
             ],
         )
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    """Cut *text* to at most *max_bytes* UTF-8 bytes without splitting a char."""
+    if max_bytes <= 0:
+        return ""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore").rstrip()

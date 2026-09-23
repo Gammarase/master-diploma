@@ -13,9 +13,7 @@ from retrieval.embeddings import EmbeddingModel
 @pytest.fixture
 def mock_settings() -> MagicMock:
     settings = MagicMock()
-    settings.embeddings.model_name = (
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-    )
+    settings.embeddings.model_name = "BAAI/bge-m3"
     settings.embeddings.device = "cpu"
     settings.embeddings.batch_size = 32
     return settings
@@ -24,8 +22,8 @@ def mock_settings() -> MagicMock:
 @pytest.fixture
 def mock_st_model() -> MagicMock:
     model = MagicMock()
-    model.encode.return_value = __import__("numpy").zeros((768,))
-    model.get_sentence_embedding_dimension.return_value = 768
+    model.encode.return_value = __import__("numpy").zeros((1024,))
+    model.get_embedding_dimension.return_value = 1024
     return model
 
 
@@ -56,6 +54,12 @@ class TestEmbedSingle:
         embedding_model.embed_single("Hello world")
         mock_st_model.encode.assert_called_once()
 
+    def test_requests_normalized_embeddings(
+        self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
+    ) -> None:
+        embedding_model.embed_single("Hello world")
+        assert mock_st_model.encode.call_args.kwargs["normalize_embeddings"] is True
+
 
 class TestEmbedBatch:
     def test_empty_list_returns_empty(self, embedding_model: EmbeddingModel) -> None:
@@ -67,9 +71,18 @@ class TestEmbedBatch:
     ) -> None:
         import numpy as np
 
-        mock_st_model.encode.return_value = np.zeros((3, 768))
+        mock_st_model.encode.return_value = np.zeros((3, 1024))
         result = embedding_model.embed_batch(["a", "b", "c"])
         assert len(result) == 3
+
+    def test_requests_normalized_embeddings(
+        self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
+    ) -> None:
+        import numpy as np
+
+        mock_st_model.encode.return_value = np.zeros((2, 1024))
+        embedding_model.embed_batch(["a", "b"])
+        assert mock_st_model.encode.call_args.kwargs["normalize_embeddings"] is True
 
     def test_raises_on_encode_failure(
         self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
@@ -96,10 +109,32 @@ class TestEmbedClaim:
 
 
 class TestDimension:
-    def test_returns_768(
+    def test_returns_model_reported_dimension(
         self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
     ) -> None:
+        assert embedding_model.dimension == 1024
+
+    def test_follows_configured_model(
+        self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
+    ) -> None:
+        mock_st_model.get_embedding_dimension.return_value = 768
         assert embedding_model.dimension == 768
+
+    def test_probes_when_model_reports_none(
+        self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
+    ) -> None:
+        import numpy as np
+
+        mock_st_model.get_embedding_dimension.return_value = None
+        mock_st_model.encode.return_value = np.zeros((384,))
+        assert embedding_model.dimension == 384
+
+    def test_dimension_is_cached(
+        self, embedding_model: EmbeddingModel, mock_st_model: MagicMock
+    ) -> None:
+        _ = embedding_model.dimension
+        _ = embedding_model.dimension
+        assert mock_st_model.get_embedding_dimension.call_count == 1
 
 
 class TestLoad:

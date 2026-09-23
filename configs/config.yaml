@@ -1,6 +1,6 @@
 pinecone:
   api_key: ""           # overridden by PINECONE_API_KEY environment variable
-  index_name: "ru22fact-evidence"
+  index_name: "ru22fact-evidence-v2"   # previous 768-dim index: "ru22fact-evidence"
   cloud: "aws"
   region: "us-east-1"
   top_k: 5
@@ -9,12 +9,25 @@ ollama:
   base_url: "http://localhost:11434"
   model: "qwen3:14b"
   temperature: 0.0
-  timeout_seconds: 60
+  timeout_seconds: 120
+  num_ctx: 8192         # context window sent as options.num_ctx
+  seed: 42
+  think: false          # disable reasoning traces (requires Ollama >= 0.9)
+  evidence_mode: "evidence_only"   # or "fact_checked_claims"
 
 embeddings:
-  model_name: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+  model_name: "BAAI/bge-m3"
   batch_size: 32
   device: "cuda"         # set to "cuda" for GPU acceleration ("cpu" default value)
+
+retrieval:
+  candidate_k: 20        # candidates fetched from Pinecone before reranking
+  reranker_model: "BAAI/bge-reranker-v2-m3"   # null disables reranking
+  min_relevance: 0.2     # drop passages scoring below this
+  max_passages_per_record: 2
+
+indexing:
+  max_passage_chars: 800
 
 preprocessing:
   supported_languages:
@@ -25,23 +38,25 @@ preprocessing:
   spacy_models:
     en: "en_core_web_sm"
     uk: "uk_core_news_sm"
+    ru: "ru_core_news_sm"
+    zh: "zh_core_web_sm"
 
 claim_extraction:
   min_claim_length: 10
   max_claim_length: 512
-  checkworthy_threshold: 0.5
-  classifier_model: "typeform/distilbert-base-uncased-mnli"
+  checkworthy_threshold: 0.1   # tuned with the "news"/"opinion" zero-shot labels
+  classifier_model: "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
   ner_weight: 0.3
   classifier_weight: 0.7
 
 verification:
-  nli_model: "cross-encoder/nli-deberta-v3-base"
-  nli_weight: 0.4
-  rag_weight: 0.6
+  nli_model: "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+  nli_weight: 0.3
+  rag_weight: 0.7
   thresholds:
-    disinformation: 0.3
-    confirmed: 0.7
-  disagreement_delta: 0.3
+    disinformation: 0.35
+    confirmed: 0.65
+  decisiveness_margin: 0.15
 
 logging:
   level: "INFO"

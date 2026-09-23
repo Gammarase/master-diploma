@@ -19,6 +19,17 @@ logger = get_logger(__name__)
 
 STANCE_LABELS: list[str] = ["agree", "disagree", "discuss", "unrelated"]
 
+# Zero-shot phrasing for the mDeBERTa-xnli classifier, mapped back to
+# STANCE_LABELS. Grammatical verb phrases ("This text supports the claim
+# that …") separated stances better than the bare labels on a multilingual
+# probe, but zero-shot stance stays weak (it rarely predicts "disagree");
+# NLIVerifier is the primary support/contradiction signal.
+_STANCE_PHRASES: dict[str, str] = {
+    "supports": "agree",
+    "contradicts": "disagree",
+    "is unrelated to": "unrelated",
+}
+
 
 @dataclass
 class StanceResult:
@@ -89,15 +100,19 @@ class StanceDetector:
         Raises:
             VerificationError: On inference failure.
         """
-        hypothesis_template = f"This text {{}} the claim: {claim}"
+        # Braces in the claim would break str.format inside the pipeline.
+        safe_claim = claim.replace("{", "(").replace("}", ")")
+        hypothesis_template = f"This text {{}} the claim that {safe_claim}"
         try:
             clf = self._load_pipeline()
             result = clf(
                 evidence,
-                candidate_labels=STANCE_LABELS,
+                candidate_labels=list(_STANCE_PHRASES),
                 hypothesis_template=hypothesis_template,
             )
-            top_label: str = result["labels"][0]
+            top_label: str = _STANCE_PHRASES.get(
+                result["labels"][0], result["labels"][0]
+            )
             top_score: float = float(result["scores"][0])
             return StanceResult(
                 claim=claim,

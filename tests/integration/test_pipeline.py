@@ -259,3 +259,83 @@ class TestHealthCheck:
         settings.pinecone.api_key = ""  # Force Pinecone failure
         status = pipeline.health_check()
         assert status["pinecone"] is False
+
+
+class TestClaimDateAndExclusion:
+    def test_exclude_passed_to_retrieval(
+        self,
+        settings: MagicMock,
+        mock_pinecone_index: MagicMock,
+        mock_ollama_client: MagicMock,
+    ) -> None:
+        pipeline = _make_pipeline(settings)
+        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
+        pipeline.analyze_single_claim(
+            "Russia launched 45 missiles at Ukraine.",
+            language="en",
+            claim_date="2022-09-19",
+            exclude=("test", "622"),
+        )
+        kwargs = pipeline._vector_store.similarity_search.call_args.kwargs
+        assert kwargs["exclude"] == ("test", "622")
+
+    def test_claim_date_reaches_rag_verifier(
+        self,
+        settings: MagicMock,
+        mock_pinecone_index: MagicMock,
+        mock_ollama_client: MagicMock,
+    ) -> None:
+        pipeline = _make_pipeline(settings)
+        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
+        pipeline.analyze_single_claim("Some claim text.", claim_date="2022-09-19")
+        claim = pipeline._rag_verifier.verify.call_args.args[0]
+        assert claim.date == "2022-09-19"
+
+    def test_defaults_without_date_or_exclusion(
+        self,
+        settings: MagicMock,
+        mock_pinecone_index: MagicMock,
+        mock_ollama_client: MagicMock,
+    ) -> None:
+        pipeline = _make_pipeline(settings)
+        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
+        pipeline.analyze_single_claim("Some claim text.")
+        assert pipeline._vector_store.similarity_search.call_args.kwargs["exclude"] is None
+        assert pipeline._rag_verifier.verify.call_args.args[0].date is None
+
+    def test_output_has_debug_metadata(
+        self,
+        settings: MagicMock,
+        mock_pinecone_index: MagicMock,
+        mock_ollama_client: MagicMock,
+    ) -> None:
+        pipeline = _make_pipeline(settings)
+        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
+        result = pipeline.analyze_single_claim("Russia launched 45 missiles at Ukraine.")
+        meta = result.processing_metadata
+        for key in (
+            "uncertainty_reason", "effective_weights", "rag_model_verdict",
+            "rag_confidence", "rag_raw_response", "evidence_mode", "models",
+        ):
+            assert key in meta
+        assert meta["models"]["reranker"] == "BAAI/bge-reranker-v2-m3"
+        assert meta["evidence_mode"] == "evidence_only"
+        for excerpt in result.evidence_excerpts:
+            assert "label_from_dataset" not in excerpt
+
+
+class TestInitialize:
+    def test_reranker_injected_into_vector_store(self, settings: MagicMock) -> None:
+        pipeline = DisinformationDetectionPipeline(settings=settings)
+        with patch("retrieval.vector_store.PineconeVectorStore.connect"), \
+             patch("verification.nli_verifier.NLIVerifier._load_model"), \
+             patch("verification.rag_verifier.OllamaClient.health_check", return_value=True), \
+             patch("pipeline.setup_logging"):
+            pipeline.initialize()
+        from retrieval.reranker import Reranker
+
+        assert isinstance(pipeline._reranker, Reranker)
+        assert pipeline._vector_store._reranker is pipeline._reranker
+        assert pipeline._initialized is True
+        # Second call is a no-op.
+        pipeline.initialize()

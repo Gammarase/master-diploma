@@ -17,7 +17,9 @@ def mock_settings() -> MagicMock:
     settings.claim_extraction.checkworthy_threshold = 0.5
     settings.claim_extraction.min_claim_length = 10
     settings.claim_extraction.max_claim_length = 512
-    settings.claim_extraction.classifier_model = "typeform/distilbert-base-uncased-mnli"
+    settings.claim_extraction.classifier_model = (
+        "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
+    )
     settings.claim_extraction.ner_weight = 0.3
     settings.claim_extraction.classifier_weight = 0.7
     return settings
@@ -51,15 +53,7 @@ def extractor(
     extractor = ClaimExtractor(mock_ner, mock_tokenizer, mock_settings)
     # Provide a mock classifier that returns high score
     mock_clf = MagicMock()
-    mock_clf.return_value = {
-        "labels": [
-            "checkworthy factual claim",
-            "opinion or speculation",
-            "question",
-            "irrelevant",
-        ],
-        "scores": [0.8, 0.1, 0.05, 0.05],
-    }
+    mock_clf.return_value = {"labels": ["news", "opinion"], "scores": [0.8, 0.2]}
     extractor._classifier = mock_clf
     return extractor
 
@@ -151,3 +145,41 @@ class TestIsFactualSentence:
     ) -> None:
         cfg = mock_settings.claim_extraction
         assert extractor._is_factual_sentence("123 456 789 000", cfg) is False
+
+
+class TestScoreSentence:
+    def test_uses_news_opinion_labels_and_template(
+        self, extractor: ClaimExtractor
+    ) -> None:
+        extractor._score_sentence("Russia launched 45 missiles.", [])
+        kwargs = extractor._classifier.call_args.kwargs
+        assert kwargs["candidate_labels"] == ["news", "opinion"]
+        assert kwargs["hypothesis_template"] == "This text is {}."
+
+    def test_combines_ner_and_classifier(
+        self, extractor: ClaimExtractor, mock_ner: MagicMock
+    ) -> None:
+        extractor._classifier.return_value = {"labels": ["opinion", "news"], "scores": [0.6, 0.4]}
+        mock_ner.has_checkworthy_entities.return_value = False
+        assert extractor._score_sentence("text", []) == pytest.approx(0.7 * 0.4)
+        mock_ner.has_checkworthy_entities.return_value = True
+        assert extractor._score_sentence("text", []) == pytest.approx(0.3 + 0.7 * 0.4)
+
+    @pytest.mark.parametrize("has_entities,expected", [(True, 1.0), (False, 0.0)])
+    def test_ner_only_without_classifier(
+        self,
+        extractor: ClaimExtractor,
+        mock_ner: MagicMock,
+        has_entities: bool,
+        expected: float,
+    ) -> None:
+        extractor._classifier = None
+        mock_ner.has_checkworthy_entities.return_value = has_entities
+        assert extractor._score_sentence("text", []) == expected
+
+    def test_ner_only_when_classifier_fails(
+        self, extractor: ClaimExtractor, mock_ner: MagicMock
+    ) -> None:
+        extractor._classifier.side_effect = RuntimeError("OOM")
+        mock_ner.has_checkworthy_entities.return_value = False
+        assert extractor._score_sentence("text", []) == 0.0

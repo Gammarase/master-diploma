@@ -50,6 +50,26 @@ class TestDetect:
         result = detector.detect("Claim", "Contradicting evidence.")
         assert result.stance == "disagree"
 
+    def test_phrases_mapped_to_stance_labels(
+        self, detector: StanceDetector, mock_pipeline: MagicMock
+    ) -> None:
+        mock_pipeline.return_value = {
+            "labels": ["contradicts", "supports", "is unrelated to"],
+            "scores": [0.7, 0.2, 0.1],
+        }
+        result = detector.detect("Claim", "Contradicting evidence.")
+        assert result.stance == "disagree"
+        kwargs = mock_pipeline.call_args.kwargs
+        assert kwargs["candidate_labels"] == ["supports", "contradicts", "is unrelated to"]
+
+    def test_braces_in_claim_are_neutralised(
+        self, detector: StanceDetector, mock_pipeline: MagicMock
+    ) -> None:
+        detector.detect("Budget {2023} cut", "Evidence.")
+        template = mock_pipeline.call_args.kwargs["hypothesis_template"]
+        assert template == "This text {} the claim that Budget (2023) cut"
+        template.format("supports")  # must not raise
+
 
 class TestToNliCompatibleScore:
     @pytest.fixture

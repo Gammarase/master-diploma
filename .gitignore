@@ -70,3 +70,9 @@ data/datasets/
 #  Pinecone / Ollama local state 
 pinecone_cache/
 ollama_cache/
+
+#  AI assistant / planning tooling (local only)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+openspec/

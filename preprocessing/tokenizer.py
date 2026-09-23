@@ -46,8 +46,9 @@ class MultilingualTokenizer:
         try:
             from langdetect import detect, LangDetectException
 
-            lang = detect(text)
-            return lang
+            # langdetect returns regional variants ("zh-cn", "zh-tw"); config
+            # keys are bare ISO 639-1 codes.
+            return detect(text).lower().split("-")[0]
         except Exception as exc:
             logger.debug(
                 "Language detection failed, defaulting to '%s': %s",
@@ -81,9 +82,12 @@ class MultilingualTokenizer:
             logger.debug("Loaded spaCy model '%s' for language '%s'", model_name, lang)
         except OSError:
             logger.warning(
-                "spaCy model '%s' not found; falling back to blank '%s' model.",
+                "spaCy package '%s' is not installed; falling back to a blank "
+                "sentence-splitting '%s' pipeline. Install it with: "
+                "python -m spacy download %s",
                 model_name,
                 lang,
+                model_name,
             )
             nlp = spacy.blank(lang if len(lang) == 2 else "xx")
             nlp.add_pipe("sentencizer")
