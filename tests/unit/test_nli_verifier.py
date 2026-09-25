@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from exceptions import NLIError
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievedEvidence
 from verification.nli_verifier import NLIResult, NLIVerifier
 
 # mDeBERTa-xnli order: entailment, neutral, contradiction
@@ -40,22 +40,24 @@ def verifier(mock_settings: MagicMock, mock_cross_encoder: MagicMock) -> NLIVeri
     return v
 
 
-def _make_evidence(text: str = "Evidence text.", score: float = 0.9) -> RetrievedEvidence:
+def _make_evidence(
+    text: str = "Evidence text.", score: float = 0.9, trust: float = 1.0
+) -> RetrievedEvidence:
     return RetrievedEvidence(
-        vector_id="test-id",
+        evidence_id="test-id",
         score=score,
-        claim_text="Claim",
         evidence_text=text,
-        label="Supported",
-        language="EN",
-        explanation="Explanation",
+        language="en",
+        trust=trust,
     )
 
 
-def _result(support: float) -> NLIResult:
+def _result(support: float, trust: float = 1.0) -> NLIResult:
     entail = max(0.0, support)
     contra = max(0.0, -support)
-    return NLIResult("c", "e", entail, contra, 1 - entail - contra, "neutral", 0.5)
+    return NLIResult(
+        "c", "e", entail, contra, 1 - entail - contra, "neutral", 0.5, trust=trust
+    )
 
 
 class TestVerifySingle:
@@ -169,6 +171,21 @@ class TestVerifyBatch:
         results = verifier.verify_batch("Claim", [])
         assert results == []
 
+    def test_results_carry_trust(
+        self, verifier: NLIVerifier, mock_cross_encoder: MagicMock
+    ) -> None:
+        mock_cross_encoder.predict.return_value = np.array([[0.8, 0.1, 0.1]] * 3)
+        evidences = [
+            _make_evidence("E0", trust=1.0),
+            _make_evidence("E1", trust=0.8),
+            _make_evidence("E2", trust=0.3),
+        ]
+        results = verifier.verify_batch("Claim", evidences)
+        assert [r.trust for r in results] == [1.0, 0.8, 0.3]
+
+    def test_verify_single_uses_full_trust(self, verifier: NLIVerifier) -> None:
+        assert verifier.verify_single("Claim", "E").trust == 1.0
+
 
 class TestAggregateNliScore:
     def test_is_static(self) -> None:
@@ -188,6 +205,17 @@ class TestAggregateNliScore:
 
     def test_empty_results_returns_neutral(self) -> None:
         assert NLIVerifier.aggregate_nli_score([]) == 0.5
+
+    def test_low_trust_passage_cannot_dominate(self) -> None:
+        results = [_result(-0.90, trust=0.3), _result(0.60, trust=0.95)]
+        assert NLIVerifier.aggregate_nli_score(results) == pytest.approx(0.785, abs=0.001)
+
+    def test_trust_scales_toward_neutral(self) -> None:
+        results = [_result(0.90, trust=0.8)]
+        assert NLIVerifier.aggregate_nli_score(results) == pytest.approx(0.86, abs=0.001)
+
+    def test_default_trust_is_one(self) -> None:
+        assert NLIResult("c", "e", 0.5, 0.1, 0.4, "entailment", 0.5).trust == 1.0
 
     def test_support_defaults_from_probabilities(self) -> None:
         r = NLIResult("c", "e", 0.7, 0.2, 0.1, "entailment", 0.7)

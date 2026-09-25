@@ -71,6 +71,9 @@ data/datasets/
 pinecone_cache/
 ollama_cache/
 
+#  Web evidence cache (search results + extracted pages)
+cache/
+
 #  AI assistant / planning tooling (local only)
 .claude/
 CLAUDE.md

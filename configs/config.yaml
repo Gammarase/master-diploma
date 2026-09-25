@@ -1,10 +1,3 @@
-pinecone:
-  api_key: ""           # overridden by PINECONE_API_KEY environment variable
-  index_name: "ru22fact-evidence-v2"   # previous 768-dim index: "ru22fact-evidence"
-  cloud: "aws"
-  region: "us-east-1"
-  top_k: 5
-
 ollama:
   base_url: "http://localhost:11434"
   model: "qwen3:14b"
@@ -13,21 +6,40 @@ ollama:
   num_ctx: 8192         # context window sent as options.num_ctx
   seed: 42
   think: false          # disable reasoning traces (requires Ollama >= 0.9)
-  evidence_mode: "evidence_only"   # or "fact_checked_claims"
-
-embeddings:
-  model_name: "BAAI/bge-m3"
-  batch_size: 32
-  device: "cuda"         # set to "cuda" for GPU acceleration ("cpu" default value)
+  evidence_mode: "web"             # web | evidence_only
 
 retrieval:
-  candidate_k: 20        # candidates fetched from Pinecone before reranking
+  top_k: 5
+  candidate_k: 40        # passages taken (in search-rank order) before reranking
   reranker_model: "BAAI/bge-reranker-v2-m3"   # null disables reranking
+  device: "cuda"         # used by the reranker ("cpu" default value)
   min_relevance: 0.2     # drop passages scoring below this
-  max_passages_per_record: 2
-
-indexing:
+  max_passages_per_source: 2   # per publisher domain
   max_passage_chars: 800
+  query_generation: true
+  max_search_requests: 8       # (query, site-group) requests per claim
+  max_pages_per_claim: 8
+  cache_dir: "cache"
+  cache_mode: "read_write"     # read_write | read_only | off
+  cache_max_age_days: null     # null = entries never expire
+
+search:
+  backend: "searxng"
+  base_url: "http://localhost:8080"
+  timeout_seconds: 20
+  min_interval_seconds: 1.0
+  results_per_query: 10
+  site_filter: "grouped"       # grouped | per_domain | none (strict mode only)
+  site_group_size: 10
+  fetch_timeout_seconds: 10
+  max_page_bytes: 2000000
+  user_agent: "DisinfoDetection-Research/1.0"
+  respect_robots: true
+
+source_policy:
+  path: "configs/source_policy.yaml"
+  mode: "strict"               # strict | lenient | off
+  unknown_trust: 0.3
 
 preprocessing:
   supported_languages:

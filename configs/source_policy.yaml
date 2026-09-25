@@ -1,0 +1,82 @@
+# Source policy for web evidence retrieval.
+#
+# Each tier has a trust value in [0, 1] and a list of domain entries. An entry
+# is a registrable domain ("reuters.com"), optionally with a path prefix
+# ("reuters.com/fact-check"). A URL matches an entry when its host equals the
+# domain or is a subdomain of it and its path starts with the prefix; the
+# longest (domain + path) match decides the tier.
+#
+# Sources of the lists:
+#   - fact_checkers: verified signatories of the IFCN Code of Principles
+#     (https://ifcncodeofprinciples.poynter.org/signatories) relevant to
+#     en/uk/ru/zh claims, plus the EU's EUvsDisinfo database.
+#   - wire_agencies: international news agencies.
+#   - primary_sources: intergovernmental organisations publishing primary
+#     statements and reports.
+#   - major_outlets: outlets with high reliability scores in Lin et al. (2023),
+#     "High level of correspondence across different news domain quality
+#     rating sets", PNAS Nexus 2(9), plus established Ukrainian and
+#     independent Russian-language outlets.
+#   - blocklist: state media under EU sanctions (Council Regulation (EU)
+#     2022/350 and later packages).
+#
+# Bump `version` whenever membership or trust values change; the version is
+# recorded with results so runs can be traced to the policy they used.
+
+version: 1
+
+tiers:
+  fact_checkers:
+    trust: 1.0
+    domains:
+      - politifact.com
+      - fullfact.org
+      - factcheck.org
+      - factcheck.afp.com
+      - reuters.com/fact-check
+      - apnews.com/hub/ap-fact-check
+      - snopes.com
+      - leadstories.com
+      - stopfake.org
+      - voxukraine.org
+      - euvsdisinfo.eu
+
+  wire_agencies:
+    trust: 0.95
+    domains:
+      - reuters.com
+      - apnews.com
+      - afp.com
+
+  primary_sources:
+    trust: 0.9
+    domains:
+      - un.org
+      - who.int
+      - iaea.org
+      - europa.eu
+      - nato.int
+      - osce.org
+
+  major_outlets:
+    trust: 0.8
+    domains:
+      - bbc.com
+      - bbc.co.uk
+      - theguardian.com
+      - nytimes.com
+      - npr.org
+      - dw.com
+      - france24.com
+      - kyivindependent.com
+      - pravda.com.ua
+      - suspilne.media
+      - meduza.io
+
+blocklist:
+  - rt.com
+  - sputnikglobe.com
+  - sputniknews.com
+  - ria.ru
+  - rg.ru
+  - iz.ru

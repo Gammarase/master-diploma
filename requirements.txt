@@ -12,11 +12,12 @@ torch>=2.2.0
 #   python -m spacy download zh_core_web_sm
 # Verify with: python -m spacy info   (should list all four pipelines)
 
-# Vector Database
-pinecone>=3.2.0
-
 # HTTP Client (Ollama)
 httpx>=0.27.0
+
+# Web evidence retrieval
+trafilatura>=2.0.0
+tldextract>=5.1.0
 
 # Data Processing
 pandas>=2.2.0

@@ -9,7 +9,7 @@ import pytest
 
 from claim_extraction.extractor import Claim
 from explainability.explainer import ExplanationOutput, Explainer
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievalResult, RetrievedEvidence
 from verification.aggregator import (
     REASON_CONFLICT,
     REASON_LOW_SCORE_MARGIN,
@@ -37,17 +37,19 @@ def _make_claim(text: str = "Russia launched missiles.", lang: str = "en") -> Cl
     )
 
 
-def _make_evidence(idx: int = 0, label: str = "Supported") -> RetrievedEvidence:
+def _make_evidence(idx: int = 0) -> RetrievedEvidence:
     return RetrievedEvidence(
-        vector_id=f"ru22fact-test-{622 + idx}-en-p{idx}",
+        evidence_id=f"abcdef0123456789-p{idx}",
         score=0.9 - idx * 0.1,
-        claim_text="Claim",
         evidence_text=f"Evidence passage {idx} with important facts.",
-        label=label,
-        language="EN",
-        explanation="Explanation here.",
-        claim_id=str(622 + idx),
-        split="test",
+        source_url="https://apnews.com/article/xyz" if idx == 0 else f"https://www.bbc.com/news/{idx}",
+        publisher="apnews.com" if idx == 0 else "bbc.com",
+        title=f"Title {idx}",
+        published_at="2022-08-12" if idx == 0 else "",
+        retrieved_at="2026-09-25T10:00:00Z",
+        source_tier="wire_agencies" if idx == 0 else "major_outlets",
+        trust=0.95 if idx == 0 else 0.8,
+        language="en",
         passage_index=idx,
     )
 
@@ -113,9 +115,9 @@ def _make_verification_result(
 @pytest.fixture
 def settings_mock() -> MagicMock:
     s = MagicMock()
-    s.ollama.evidence_mode = "evidence_only"
+    s.ollama.evidence_mode = "web"
     s.ollama.model = "qwen3:14b"
-    s.embeddings.model_name = "BAAI/bge-m3"
+    s.source_policy.mode = "strict"
     s.retrieval.reranker_model = "BAAI/bge-reranker-v2-m3"
     s.verification.nli_model = "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7"
     return s
@@ -163,21 +165,29 @@ class TestExplain:
         output = explainer.explain(result)
         assert len(output.citations) == 2
 
-    def test_citations_have_dataset_field(self, explainer: Explainer) -> None:
-        result = _make_verification_result()
-        output = explainer.explain(result)
-        for citation in output.citations:
-            assert citation["dataset"] == "RU22Fact"
-
-    def test_citations_identify_source_record(self, explainer: Explainer) -> None:
+    def test_citation_for_wire_story(self, explainer: Explainer) -> None:
         output = explainer.explain(_make_verification_result())
         first = output.citations[0]
-        assert first["split"] == "test"
-        assert first["claim_id"] == "622"
-        assert first["passage_index"] == 0
-        assert first["vector_id"] == "ru22fact-test-622-en-p0"
-        assert first["language"] == "EN"
-        assert all(c["claim_id"] for c in output.citations)
+        assert first == {
+            "passage_index": 0,
+            "evidence_id": "abcdef0123456789-p0",
+            "url": "https://apnews.com/article/xyz",
+            "publisher": "apnews.com",
+            "title": "Title 0",
+            "published_at": "2022-08-12",
+            "retrieved_at": "2026-09-25T10:00:00Z",
+            "tier": "wire_agencies",
+            "trust": 0.95,
+            "language": "en",
+        }
+        assert output.citations[1]["published_at"] == ""
+        assert [c["passage_index"] for c in output.citations] == [0, 1]
+
+    def test_no_dataset_fields(self, explainer: Explainer) -> None:
+        output = explainer.explain(_make_verification_result())
+        parsed = json.loads(explainer.to_json(output))
+        for citation in parsed["citations"]:
+            assert not {"dataset", "split", "vector_id", "claim_id"} & set(citation)
 
     def test_excerpts_have_no_dataset_label(self, explainer: Explainer) -> None:
         output = explainer.explain(_make_verification_result())
@@ -209,14 +219,22 @@ class TestProcessingMetadata:
         "rag_confidence",
         "rag_raw_response",
         "evidence_mode",
+        "search_backend",
+        "search_status",
+        "search_queries",
+        "source_policy_mode",
         "models",
     }
 
     def test_metadata_keys_present(
         self, settings_mock: MagicMock
     ) -> None:
+        retrieval = RetrievalResult(
+            evidences=[], status="ok", queries=["q1", "q2"], backend="searxng"
+        )
         output = Explainer(settings_mock).explain(
-            _make_verification_result(verdict=VERDICT_UNCERTAIN, reason=REASON_CONFLICT)
+            _make_verification_result(verdict=VERDICT_UNCERTAIN, reason=REASON_CONFLICT),
+            retrieval,
         )
         meta = output.processing_metadata
         assert self._KEYS <= set(meta)
@@ -225,9 +243,13 @@ class TestProcessingMetadata:
         assert meta["rag_model_verdict"] == "SUPPORTED"
         assert meta["rag_confidence"] == pytest.approx(0.85)
         assert meta["rag_raw_response"] == '{"verdict": "SUPPORTED"}'
-        assert meta["evidence_mode"] == "evidence_only"
+        assert meta["evidence_mode"] == "web"
+        assert meta["search_backend"] == "searxng"
+        assert meta["search_status"] == "ok"
+        assert meta["search_queries"] == ["q1", "q2"]
+        assert meta["source_policy_mode"] == "strict"
+        assert "embeddings" not in meta["models"]
         assert meta["models"] == {
-            "embeddings": "BAAI/bge-m3",
             "reranker": "BAAI/bge-reranker-v2-m3",
             "nli": "MoritzLaurer/mDeBERTa-v3-base-xnli-multilingual-nli-2mil7",
             "llm": "qwen3:14b",
@@ -238,7 +260,11 @@ class TestProcessingMetadata:
         assert self._KEYS <= set(meta)
         assert meta["evidence_mode"] is None
         assert meta["models"]["llm"] is None
+        assert "embeddings" not in meta["models"]
         assert meta["uncertainty_reason"] is None
+        assert meta["search_status"] is None
+        assert meta["search_queries"] == []
+        assert meta["source_policy_mode"] is None
 
 
 class TestGenerateExplanationText:
@@ -280,7 +306,36 @@ class TestGenerateExplanationText:
             verdict=VERDICT_UNCERTAIN, reason=REASON_NO_EVIDENCE, n_evidence=0
         )
         text = explainer._generate_explanation_text(result)
-        assert "No sufficiently relevant evidence was found" in text
+        assert "No sufficiently relevant evidence from trusted sources" in text
+
+    def test_no_evidence_with_ok_search(self, explainer: Explainer) -> None:
+        result = _make_verification_result(
+            verdict=VERDICT_UNCERTAIN, reason=REASON_NO_EVIDENCE, n_evidence=0
+        )
+        output = explainer.explain(result, RetrievalResult(status="no_results"))
+        assert "No sufficiently relevant evidence from trusted sources" in output.explanation
+
+    def test_search_unavailable_explanation(self, explainer: Explainer) -> None:
+        result = _make_verification_result(
+            verdict=VERDICT_UNCERTAIN, reason=REASON_NO_EVIDENCE, n_evidence=0
+        )
+        output = explainer.explain(
+            result, RetrievalResult(status="unavailable", backend="searxng")
+        )
+        assert "evidence search could not be performed" in output.explanation
+        assert "Retry later" in output.explanation
+        assert "manual" in output.explanation.lower()
+        assert "No sufficiently relevant evidence" not in output.explanation
+        assert output.processing_metadata["search_status"] == "unavailable"
+
+    def test_unavailable_status_only_affects_no_evidence(
+        self, explainer: Explainer
+    ) -> None:
+        result = _make_verification_result(
+            verdict=VERDICT_UNCERTAIN, reason=REASON_CONFLICT
+        )
+        output = explainer.explain(result, RetrievalResult(status="unavailable"))
+        assert "opposite directions" in output.explanation
 
     def test_rag_reasoning_appended(self, explainer: Explainer) -> None:
         result = _make_verification_result()

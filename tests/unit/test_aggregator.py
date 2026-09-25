@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievedEvidence
 from verification.aggregator import (
     REASON_CONFLICT,
     REASON_LOW_SCORE_MARGIN,
@@ -61,7 +61,7 @@ def _make_rag(verdict: str = "SUPPORTED", confidence: float = 0.8) -> RAGVerdict
 
 def _evidences(n: int = 2) -> list[RetrievedEvidence]:
     return [
-        RetrievedEvidence(f"v{i}", 0.9, "c", f"e{i}", "NEI", "EN", "x")
+        RetrievedEvidence(evidence_id=f"v{i}", score=0.9, evidence_text=f"e{i}")
         for i in range(n)
     ]
 

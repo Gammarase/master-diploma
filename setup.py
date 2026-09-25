@@ -8,8 +8,9 @@ _INSTALL_REQUIRES = [
     "transformers>=4.40.0",
     "sentence-transformers>=2.7.0",
     "torch>=2.2.0",
-    "pinecone>=3.2.0",
     "httpx>=0.27.0",
+    "trafilatura>=2.0.0",
+    "tldextract>=5.1.0",
     "pandas>=2.2.0",
     "numpy>=1.26.0",
     "beautifulsoup4>=4.12.0",
@@ -32,18 +33,13 @@ setup(
     version="0.1.0",
     description=(
         "Modular Python pipeline for detecting disinformation using "
-        "Pinecone vector search, NLI models, and Ollama LLMs."
+        "web evidence retrieval, NLI models, and Ollama LLMs."
     ),
     author="Krivytskyi Bohdan",
     python_requires=">=3.10",
     packages=find_packages(exclude=["tests*", "notebooks*", "data*"]),
     install_requires=_INSTALL_REQUIRES,
     extras_require={"dev": _DEV_REQUIRES},
-    entry_points={
-        "console_scripts": [
-            "disinfo-index=data.loaders.ru22fact_loader:main",
-        ],
-    },
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",

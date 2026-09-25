@@ -2,7 +2,7 @@
 Configuration management for the Disinformation Detection System.
 
 Settings are loaded from configs/config.yaml and can be overridden via
-environment variables (e.g. PINECONE_API_KEY overrides pinecone.api_key).
+environment variables (e.g. SEARCH_BASE_URL overrides search.base_url).
 """
 
 from __future__ import annotations
@@ -18,11 +18,10 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
-    "PineconeSettings",
     "OllamaSettings",
-    "EmbeddingSettings",
     "RetrievalSettings",
-    "IndexingSettings",
+    "SearchSettings",
+    "SourcePolicySettings",
     "PreprocessingSettings",
     "ClaimExtractionSettings",
     "VerificationThresholds",
@@ -46,20 +45,6 @@ def _load_yaml_defaults() -> dict[str, Any]:
 _YAML = _load_yaml_defaults()
 
 
-class PineconeSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="PINECONE_")
-
-    api_key: str = Field(default=_YAML.get("pinecone", {}).get("api_key", ""))
-    index_name: str = Field(
-        default=_YAML.get("pinecone", {}).get("index_name", "ru22fact-evidence")
-    )
-    cloud: str = Field(default=_YAML.get("pinecone", {}).get("cloud", "aws"))
-    region: str = Field(
-        default=_YAML.get("pinecone", {}).get("region", "us-east-1")
-    )
-    top_k: int = Field(default=_YAML.get("pinecone", {}).get("top_k", 5))
-
-
 class OllamaSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OLLAMA_")
 
@@ -76,52 +61,108 @@ class OllamaSettings(BaseSettings):
     num_ctx: int = Field(default=_YAML.get("ollama", {}).get("num_ctx", 8192))
     seed: int = Field(default=_YAML.get("ollama", {}).get("seed", 42))
     think: bool = Field(default=_YAML.get("ollama", {}).get("think", False))
-    evidence_mode: Literal["evidence_only", "fact_checked_claims"] = Field(
-        default=_YAML.get("ollama", {}).get("evidence_mode", "evidence_only")
-    )
-
-
-class EmbeddingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="EMBEDDINGS_")
-
-    model_name: str = Field(
-        default=_YAML.get("embeddings", {}).get(
-            "model_name",
-            "BAAI/bge-m3",
-        )
-    )
-    batch_size: int = Field(
-        default=_YAML.get("embeddings", {}).get("batch_size", 32)
-    )
-    device: str = Field(
-        default=_YAML.get("embeddings", {}).get("device", "cpu")
+    evidence_mode: Literal["web", "evidence_only"] = Field(
+        default=_YAML.get("ollama", {}).get("evidence_mode", "web")
     )
 
 
 class RetrievalSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="RETRIEVAL_")
 
+    top_k: int = Field(default=_YAML.get("retrieval", {}).get("top_k", 5))
     candidate_k: int = Field(
-        default=_YAML.get("retrieval", {}).get("candidate_k", 20)
+        default=_YAML.get("retrieval", {}).get("candidate_k", 40)
     )
     reranker_model: str | None = Field(
         default=_YAML.get("retrieval", {}).get(
             "reranker_model", "BAAI/bge-reranker-v2-m3"
         )
     )
+    device: str = Field(default=_YAML.get("retrieval", {}).get("device", "cpu"))
     min_relevance: float = Field(
         default=_YAML.get("retrieval", {}).get("min_relevance", 0.2)
     )
-    max_passages_per_record: int = Field(
-        default=_YAML.get("retrieval", {}).get("max_passages_per_record", 2)
+    max_passages_per_source: int = Field(
+        default=_YAML.get("retrieval", {}).get("max_passages_per_source", 2)
+    )
+    max_passage_chars: int = Field(
+        default=_YAML.get("retrieval", {}).get("max_passage_chars", 800)
+    )
+    query_generation: bool = Field(
+        default=_YAML.get("retrieval", {}).get("query_generation", True)
+    )
+    max_search_requests: int = Field(
+        default=_YAML.get("retrieval", {}).get("max_search_requests", 8)
+    )
+    max_pages_per_claim: int = Field(
+        default=_YAML.get("retrieval", {}).get("max_pages_per_claim", 8)
+    )
+    cache_dir: str = Field(
+        default=_YAML.get("retrieval", {}).get("cache_dir", "cache")
+    )
+    cache_mode: Literal["read_write", "read_only", "off"] = Field(
+        default=_YAML.get("retrieval", {}).get("cache_mode", "read_write")
+    )
+    cache_max_age_days: float | None = Field(
+        default=_YAML.get("retrieval", {}).get("cache_max_age_days", None)
     )
 
 
-class IndexingSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="INDEXING_")
+class SearchSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SEARCH_")
 
-    max_passage_chars: int = Field(
-        default=_YAML.get("indexing", {}).get("max_passage_chars", 800)
+    backend: Literal["searxng"] = Field(
+        default=_YAML.get("search", {}).get("backend", "searxng")
+    )
+    base_url: str = Field(
+        default=_YAML.get("search", {}).get("base_url", "http://localhost:8080")
+    )
+    timeout_seconds: float = Field(
+        default=_YAML.get("search", {}).get("timeout_seconds", 20)
+    )
+    min_interval_seconds: float = Field(
+        default=_YAML.get("search", {}).get("min_interval_seconds", 1.0)
+    )
+    results_per_query: int = Field(
+        default=_YAML.get("search", {}).get("results_per_query", 10)
+    )
+    site_filter: Literal["grouped", "per_domain", "none"] = Field(
+        default=_YAML.get("search", {}).get("site_filter", "grouped")
+    )
+    site_group_size: int = Field(
+        default=_YAML.get("search", {}).get("site_group_size", 10), ge=1
+    )
+    fetch_timeout_seconds: float = Field(
+        default=_YAML.get("search", {}).get("fetch_timeout_seconds", 10)
+    )
+    max_page_bytes: int = Field(
+        default=_YAML.get("search", {}).get("max_page_bytes", 2_000_000)
+    )
+    user_agent: str = Field(
+        default=_YAML.get("search", {}).get(
+            "user_agent", "DisinfoDetection-Research/1.0"
+        )
+    )
+    respect_robots: bool = Field(
+        default=_YAML.get("search", {}).get("respect_robots", True)
+    )
+
+
+class SourcePolicySettings(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="SOURCE_POLICY_")
+
+    path: str = Field(
+        default=_YAML.get("source_policy", {}).get(
+            "path", "configs/source_policy.yaml"
+        )
+    )
+    mode: Literal["strict", "lenient", "off"] = Field(
+        default=_YAML.get("source_policy", {}).get("mode", "strict")
+    )
+    unknown_trust: float = Field(
+        default=_YAML.get("source_policy", {}).get("unknown_trust", 0.3),
+        ge=0.0,
+        le=1.0,
     )
 
 
@@ -263,7 +304,7 @@ class Settings(BaseSettings):
     """Top-level settings aggregating all subsystem configurations.
 
     Environment variable overrides use double-underscore as separator:
-      PINECONE__API_KEY=xxx  overrides  pinecone.api_key
+      SEARCH__BASE_URL=http://host:8080  overrides  search.base_url
     """
 
     model_config = SettingsConfigDict(
@@ -272,11 +313,12 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
     )
 
-    pinecone: PineconeSettings = Field(default_factory=PineconeSettings)
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)
-    embeddings: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
-    indexing: IndexingSettings = Field(default_factory=IndexingSettings)
+    search: SearchSettings = Field(default_factory=SearchSettings)
+    source_policy: SourcePolicySettings = Field(
+        default_factory=SourcePolicySettings
+    )
     preprocessing: PreprocessingSettings = Field(
         default_factory=PreprocessingSettings
     )

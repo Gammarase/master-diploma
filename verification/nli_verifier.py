@@ -13,7 +13,7 @@ from typing import Any
 
 from exceptions import NLIError
 from logging_config import get_logger
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievedEvidence
 
 __all__ = ["NLIVerifier", "NLIResult"]
 
@@ -35,6 +35,7 @@ class NLIResult:
         predicted_label: The argmax label.
         confidence: The highest of the three scores.
         support: Signed support ``p_entailment - p_contradiction`` in [-1, 1].
+        trust: Source trust of the passage in [0, 1], used for weighting.
     """
 
     claim: str
@@ -45,6 +46,7 @@ class NLIResult:
     predicted_label: str
     confidence: float
     support: float | None = None
+    trust: float = 1.0
 
     def __post_init__(self) -> None:
         if self.support is None:
@@ -112,16 +114,23 @@ class NLIVerifier:
             evidences: List of RetrievedEvidence from retrieval.
 
         Returns:
-            List of NLIResult, one per evidence passage, in passage order.
+            List of NLIResult, one per evidence passage, in passage order,
+            each carrying its passage's source trust.
 
         Raises:
             NLIError: On batch inference failure.
         """
         if not evidences:
             return []
-        return self._infer(claim, [ev.evidence_text for ev in evidences])
+        return self._infer(
+            claim,
+            [ev.evidence_text for ev in evidences],
+            [float(getattr(ev, "trust", 1.0)) for ev in evidences],
+        )
 
-    def _infer(self, claim: str, premises: list[str]) -> list[NLIResult]:
+    def _infer(
+        self, claim: str, premises: list[str], trusts: list[float] | None = None
+    ) -> list[NLIResult]:
         """Score ``(premise, claim)`` pairs and build NLIResults."""
         try:
             model = self._load_model()
@@ -135,8 +144,10 @@ class NLIVerifier:
         except Exception as exc:
             raise NLIError("NLI inference failed", original_error=exc) from exc
 
+        if trusts is None:
+            trusts = [1.0] * len(premises)
         results: list[NLIResult] = []
-        for scores, premise in zip(scores_batch, premises):
+        for scores, premise, trust in zip(scores_batch, premises, trusts):
             label_scores = {
                 label: float(scores[label_map[label]]) for label in _NLI_LABELS
             }
@@ -150,6 +161,7 @@ class NLIVerifier:
                     neutral_score=label_scores["neutral"],
                     predicted_label=predicted_label,
                     confidence=label_scores[predicted_label],
+                    trust=trust,
                 )
             )
         return results
@@ -158,9 +170,11 @@ class NLIVerifier:
     def aggregate_nli_score(results: list[NLIResult]) -> float:
         """Convert per-passage NLI results into one truthfulness score.
 
-        The passage with the strongest signed support ``s`` (largest ``|s|``)
-        decides: ``score = (1 + s*) / 2``. One strongly contradicting passage
-        is not diluted by merely related ones.
+        Each passage's signed support ``s`` is weighted by its source trust
+        ``t``: ``w = t * s``. The passage with the largest ``|w|`` decides:
+        ``score = (1 + w*) / 2``. One strongly contradicting passage is not
+        diluted by merely related ones, and a low-trust page cannot outweigh
+        a strong passage from a trusted source.
 
         Args:
             results: NLI results for a claim against its evidence passages.
@@ -170,7 +184,9 @@ class NLIVerifier:
         """
         if not results:
             return 0.5
-        strongest = max((r.support for r in results), key=abs)
+        strongest = max(
+            (r.trust * (r.support or 0.0) for r in results), key=abs
+        )
         return max(0.0, min(1.0, (1.0 + strongest) / 2.0))
 
     @staticmethod

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from logging_config import get_logger
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievedEvidence
 from verification.nli_verifier import NLIResult, NLIVerifier
 from verification.rag_verifier import RAGVerdict
 

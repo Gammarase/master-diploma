@@ -48,10 +48,10 @@ class TestMultilingualNLI:
         assert result.contradiction_score > result.entailment_score
 
     def test_probabilities_sum_to_one(self, nli_verifier) -> None:
-        from retrieval.vector_store import RetrievedEvidence
+        from retrieval.evidence import RetrievedEvidence
 
         evidences = [
-            RetrievedEvidence(f"v{i}", 0.9, "", text, "NEI", "UK", "")
+            RetrievedEvidence(evidence_id=f"v{i}", score=0.9, evidence_text=text)
             for i, text in enumerate(
                 [
                     "Україна отримала далекобійні ракети.",

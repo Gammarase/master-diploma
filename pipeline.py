@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from configs import Settings, get_settings
-from exceptions import OllamaConnectionError, VectorStoreError
 from explainability.explainer import ExplanationOutput, Explainer
 from logging_config import get_logger, setup_logging
 from preprocessing import PreprocessingPipeline, PreprocessedText
@@ -28,19 +27,17 @@ class PipelineConfig:
 
     Attributes:
         run_ner: Whether to run NER-based claim scoring (default True).
-        filter_language: If set, restrict retrieval to this language code.
         top_k: Override the default top-k for evidence retrieval.
     """
 
     run_ner: bool = True
-    filter_language: str | None = None
     top_k: int | None = None
 
 
 class DisinformationDetectionPipeline:
     """End-to-end disinformation detection pipeline.
 
-    All heavy components (ML models, Pinecone, Ollama) are lazy-loaded
+    All heavy components (ML models, SearXNG, Ollama) are lazy-loaded
     inside ``initialize()``. The pipeline can be instantiated cheaply
     for testing by never calling ``initialize()``.
 
@@ -55,22 +52,22 @@ class DisinformationDetectionPipeline:
         self._explainer = Explainer(self._settings)
 
         # Lazily-initialized components
-        self._embedder: Any | None = None
         self._reranker: Any | None = None
-        self._vector_store: Any | None = None
+        self._retriever: Any | None = None
         self._nli_verifier: Any | None = None
         self._rag_verifier: Any | None = None
         self._claim_extractor: Any | None = None
         self._initialized: bool = False
 
     def initialize(self) -> None:
-        """Load all models and establish connections to Pinecone and Ollama.
+        """Load all models and connect to SearXNG and Ollama.
 
         Call this once before using ``analyze()`` or ``analyze_single_claim()``.
 
         Raises:
-            EmbeddingError: If the embedding model cannot be loaded.
-            PineconeConnectionError: If Pinecone is unreachable or misconfigured.
+            RetrievalError: If the source policy file is missing or invalid.
+            SearchBackendError: If SearXNG is unreachable or does not serve
+                the JSON format (skipped when the cache is ``read_only``).
             OllamaConnectionError: If the Ollama server is not running.
             NLIError: If the NLI model cannot be loaded.
         """
@@ -85,23 +82,25 @@ class DisinformationDetectionPipeline:
             log_file=self._settings.logging.log_file,
         )
 
-        # Embedding model
-        from retrieval.embeddings import EmbeddingModel
-
-        self._embedder = EmbeddingModel(self._settings)
-
         # Reranker (lazy-loaded on first query; disabled when not configured)
         from retrieval.reranker import Reranker
 
         self._reranker = Reranker(self._settings)
 
-        # Pinecone vector store
-        from retrieval.vector_store import PineconeVectorStore
+        # Source policy, cache, search backend and page fetcher
+        from retrieval.cache import WebCache
+        from retrieval.page_fetcher import PageFetcher
+        from retrieval.source_policy import SourcePolicy
+        from retrieval.web_search import SearxngBackend
 
-        self._vector_store = PineconeVectorStore(
-            self._settings, self._embedder, reranker=self._reranker
-        )
-        self._vector_store.connect()
+        policy = SourcePolicy.from_settings(self._settings)
+        cache = WebCache.from_settings(self._settings)
+        backend = SearxngBackend.from_settings(self._settings)
+        if cache.offline:
+            logger.info("Cache is read_only: skipping the SearXNG health check.")
+        else:
+            backend.health_check()
+        fetcher = PageFetcher.from_settings(self._settings, policy, cache)
 
         # NLI verifier
         from verification.nli_verifier import NLIVerifier
@@ -115,6 +114,24 @@ class DisinformationDetectionPipeline:
         ollama_client = OllamaClient(self._settings)
         ollama_client.health_check()
         self._rag_verifier = RAGVerifier(ollama_client, self._settings)
+
+        # Query builder + web evidence retriever
+        from retrieval.query_builder import QueryBuilder
+        from retrieval.web_retriever import WebEvidenceRetriever
+
+        query_builder = QueryBuilder(
+            ollama_client.generate,
+            enabled=self._settings.retrieval.query_generation,
+        )
+        self._retriever = WebEvidenceRetriever(
+            self._settings,
+            backend,
+            fetcher,
+            policy,
+            query_builder,
+            self._reranker,
+            cache=cache,
+        )
 
         # Claim extractor (lazy model load on first use)
         from claim_extraction.extractor import ClaimExtractor
@@ -187,7 +204,6 @@ class DisinformationDetectionPipeline:
         claim_text: str,
         language: str = "en",
         claim_date: str | None = None,
-        exclude: tuple[str, str] | None = None,
     ) -> ExplanationOutput:
         """Verify a single claim string directly, skipping extraction.
 
@@ -198,8 +214,6 @@ class DisinformationDetectionPipeline:
             claim_text: The claim to verify.
             language: Language code for the claim.
             claim_date: When the claim was made, if known; shown to the LLM.
-            exclude: ``(split, dataset_id)`` of the claim's own record, so its
-                evidence is not retrieved when the claim itself is indexed.
 
         Returns:
             ExplanationOutput for the claim.
@@ -214,26 +228,24 @@ class DisinformationDetectionPipeline:
             language=language,
             date=claim_date,
         )
-        return self._process_claim(claim, PipelineConfig(), exclude=exclude)
+        return self._process_claim(claim, PipelineConfig())
 
     def health_check(self) -> dict[str, bool]:
         """Check connectivity for all external services.
 
         Returns:
-            Dict with keys ``"pinecone"`` and ``"ollama"``, values True/False.
+            Dict with keys ``"searxng"`` and ``"ollama"``, values True/False.
         """
-        status: dict[str, bool] = {"pinecone": False, "ollama": False}
+        status: dict[str, bool] = {"searxng": False, "ollama": False}
 
         try:
-            from retrieval.embeddings import EmbeddingModel
-            from retrieval.vector_store import PineconeVectorStore
+            from retrieval.web_search import SearxngBackend
 
-            embedder = EmbeddingModel(self._settings)
-            store = PineconeVectorStore(self._settings, embedder)
-            store.connect()
-            status["pinecone"] = True
+            status["searxng"] = SearxngBackend.from_settings(
+                self._settings
+            ).health_check()
         except Exception as exc:
-            logger.warning("Pinecone health check failed: %s", exc)
+            logger.warning("SearXNG health check failed: %s", exc)
 
         try:
             from verification.rag_verifier import OllamaClient
@@ -249,28 +261,24 @@ class DisinformationDetectionPipeline:
         self,
         claim: Any,
         cfg: PipelineConfig,
-        exclude: tuple[str, str] | None = None,
     ) -> ExplanationOutput:
         """Run the retrieval → verification → explanation steps for one claim.
 
-        Gracefully degrades to NLI-only if Ollama is unreachable.
+        Gracefully degrades to NLI-only if Ollama is unreachable. A failed
+        search yields no evidence (status ``unavailable``), not an error.
 
         Args:
             claim: A Claim dataclass instance (its ``date`` reaches the LLM).
             cfg: PipelineConfig for this invocation.
-            exclude: ``(split, dataset_id)`` of a record to exclude from
-                retrieval.
 
         Returns:
             ExplanationOutput.
         """
-        # Retrieve evidence
-        evidences = self._vector_store.similarity_search(
-            claim.text,
-            top_k=cfg.top_k,
-            filter_language=cfg.filter_language,
-            exclude=exclude,
+        # Retrieve evidence from the web
+        retrieval = self._retriever.retrieve(
+            claim.text, language=claim.language, top_k=cfg.top_k
         )
+        evidences = retrieval.evidences
 
         # NLI verification
         nli_results = self._nli_verifier.verify_batch(claim.text, evidences)
@@ -302,7 +310,7 @@ class DisinformationDetectionPipeline:
         )
 
         # Explain
-        return self._explainer.explain(verification_result)
+        return self._explainer.explain(verification_result, retrieval)
 
     def _ensure_initialized(self) -> None:
         """Raise RuntimeError if ``initialize()`` has not been called."""

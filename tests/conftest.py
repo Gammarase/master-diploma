@@ -1,7 +1,7 @@
 """
 Shared pytest fixtures for the Disinformation Detection System test suite.
 
-All external service interactions (Pinecone, Ollama) are mocked so that
+All external service interactions (SearXNG, web pages, Ollama) are mocked so that
 tests can run without network access or running services.
 """
 
@@ -15,13 +15,13 @@ import pytest
 from claim_extraction.extractor import Claim
 from claim_extraction.ner_module import NamedEntity
 from preprocessing import PreprocessedText
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievalResult, RetrievedEvidence
 from verification.aggregator import VerificationResult
 from verification.nli_verifier import NLIResult
 from verification.rag_verifier import RAGVerdict
 
 
-# ─── Slow-test gating ────────────────────────────────────────────────────────
+# ─── Slow- and live-test gating ──────────────────────────────────────────────
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
@@ -35,6 +35,12 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
+    # Live tests hit SearXNG and the web; run them only when selected with -m live.
+    if "live" not in (config.getoption("-m") or ""):
+        skip_live = pytest.mark.skip(reason="live test: use -m live to run")
+        for item in items:
+            if "live" in item.keywords:
+                item.add_marker(skip_live)
     if config.getoption("--run-slow"):
         return
     skip_slow = pytest.mark.skip(reason="slow test: use --run-slow to run")
@@ -49,12 +55,6 @@ def pytest_collection_modifyitems(
 def settings() -> MagicMock:
     """Return a fully-mocked Settings object with safe test defaults."""
     s = MagicMock()
-    # Pinecone
-    s.pinecone.api_key = "test-pinecone-key"
-    s.pinecone.index_name = "test-index"
-    s.pinecone.cloud = "aws"
-    s.pinecone.region = "us-east-1"
-    s.pinecone.top_k = 3
     # Ollama
     s.ollama.base_url = "http://localhost:11434"
     s.ollama.model = "qwen3:14b"
@@ -63,17 +63,37 @@ def settings() -> MagicMock:
     s.ollama.num_ctx = 8192
     s.ollama.seed = 42
     s.ollama.think = False
-    s.ollama.evidence_mode = "evidence_only"
-    # Embeddings
-    s.embeddings.model_name = "BAAI/bge-m3"
-    s.embeddings.device = "cpu"
-    s.embeddings.batch_size = 32
-    # Retrieval / indexing
-    s.retrieval.candidate_k = 20
+    s.ollama.evidence_mode = "web"
+    # Retrieval
+    s.retrieval.top_k = 5
+    s.retrieval.candidate_k = 40
     s.retrieval.reranker_model = "BAAI/bge-reranker-v2-m3"
+    s.retrieval.device = "cpu"
     s.retrieval.min_relevance = 0.2
-    s.retrieval.max_passages_per_record = 2
-    s.indexing.max_passage_chars = 800
+    s.retrieval.max_passages_per_source = 2
+    s.retrieval.max_passage_chars = 800
+    s.retrieval.query_generation = True
+    s.retrieval.max_search_requests = 8
+    s.retrieval.max_pages_per_claim = 8
+    s.retrieval.cache_dir = "cache"
+    s.retrieval.cache_mode = "off"
+    s.retrieval.cache_max_age_days = None
+    # Web search
+    s.search.backend = "searxng"
+    s.search.base_url = "http://localhost:8080"
+    s.search.timeout_seconds = 5
+    s.search.min_interval_seconds = 0.0
+    s.search.results_per_query = 10
+    s.search.site_filter = "grouped"
+    s.search.site_group_size = 10
+    s.search.fetch_timeout_seconds = 5
+    s.search.max_page_bytes = 2_000_000
+    s.search.user_agent = "DisinfoDetection-Test/1.0"
+    s.search.respect_robots = True
+    # Source policy
+    s.source_policy.path = "configs/source_policy.yaml"
+    s.source_policy.mode = "strict"
+    s.source_policy.unknown_trust = 0.3
     # Preprocessing
     s.preprocessing.supported_languages = ["en", "uk"]
     s.preprocessing.spacy_models = {"en": "en_core_web_sm", "uk": "uk_core_news_sm"}
@@ -103,47 +123,19 @@ def settings() -> MagicMock:
     return s
 
 
-# ─── Pinecone mock ────────────────────────────────────────────────────────────
+# ─── Retrieval mock ───────────────────────────────────────────────────────────
 
 @pytest.fixture
-def mock_pinecone_index() -> MagicMock:
-    """Mock pinecone.Index with upsert and query methods."""
-    index = MagicMock()
-    index.upsert.return_value = None
-    index.query.return_value = {
-        "matches": [
-            {
-                "id": "ru22fact-0-en",
-                "score": 0.92,
-                "metadata": {
-                    "claim_id": "0",
-                    "claim_text": "Russia launched 45 missiles at Ukraine.",
-                    "evidence_text": (
-                        "According to official Ukrainian reports, "
-                        "Russia launched a series of missile strikes."
-                    ),
-                    "label": "Supported",
-                    "language": "EN",
-                    "explanation": "Multiple sources confirm the attack.",
-                },
-            },
-            {
-                "id": "ru22fact-1-en",
-                "score": 0.85,
-                "metadata": {
-                    "claim_id": "1",
-                    "claim_text": "NATO did not respond to the attack.",
-                    "evidence_text": (
-                        "NATO condemned the attacks and pledged additional support."
-                    ),
-                    "label": "Refuted",
-                    "language": "EN",
-                    "explanation": "NATO did respond with statements and aid.",
-                },
-            },
-        ]
-    }
-    return index
+def mock_retriever(sample_evidences: list[RetrievedEvidence]) -> MagicMock:
+    """Mock WebEvidenceRetriever returning the sample evidences with status ok."""
+    retriever = MagicMock()
+    retriever.retrieve.return_value = RetrievalResult(
+        evidences=list(sample_evidences),
+        status="ok",
+        queries=["Russia launched 45 missiles at Ukraine."],
+        backend="searxng",
+    )
+    return retriever
 
 
 # ─── Ollama mock ──────────────────────────────────────────────────────────────
@@ -190,34 +182,47 @@ def sample_claim() -> Claim:
 
 @pytest.fixture
 def sample_evidences() -> list[RetrievedEvidence]:
-    """Three RetrievedEvidence instances with mixed labels."""
+    """Three web evidence passages from trusted sources."""
     return [
         RetrievedEvidence(
-            vector_id="ru22fact-0-en",
+            evidence_id="0f1e2d3c4b5a6978-p0",
             score=0.92,
-            claim_text="Russia launched missiles at Ukraine.",
             evidence_text="Russia conducted a large-scale missile attack on Ukrainian cities.",
-            label="Supported",
-            language="EN",
-            explanation="Multiple official sources confirmed the missile strikes.",
+            source_url="https://apnews.com/article/russia-ukraine-missiles",
+            publisher="apnews.com",
+            title="Russia fires missiles at Ukrainian cities",
+            published_at="2022-10-10",
+            retrieved_at="2026-09-25T10:00:00Z",
+            source_tier="wire_agencies",
+            trust=0.95,
+            language="en",
         ),
         RetrievedEvidence(
-            vector_id="ru22fact-1-en",
+            evidence_id="8a7b6c5d4e3f2011-p0",
             score=0.85,
-            claim_text="Ukraine was not attacked.",
             evidence_text="No evidence of attacks was found in the reviewed period.",
-            label="Refuted",
-            language="EN",
-            explanation="Contradicts verified reports.",
+            source_url="https://www.bbc.com/news/world-europe-1",
+            publisher="bbc.com",
+            title="Ukraine war latest",
+            published_at="",
+            retrieved_at="2026-09-25T10:00:01Z",
+            source_tier="major_outlets",
+            trust=0.8,
+            language="en",
         ),
         RetrievedEvidence(
-            vector_id="ru22fact-2-uk",
+            evidence_id="1122334455667788-p1",
             score=0.78,
-            claim_text="Росія атакувала Україну.",
             evidence_text="Офіційні джерела підтвердили ракетний удар.",
-            label="Supported",
-            language="UK",
-            explanation="Підтверджено офіційними джерелами.",
+            source_url="https://suspilne.media/123-raketnyi-udar/",
+            publisher="suspilne.media",
+            title="Ракетний удар",
+            published_at="2022-10-10",
+            retrieved_at="2026-09-25T10:00:02Z",
+            source_tier="major_outlets",
+            trust=0.8,
+            language="uk",
+            passage_index=1,
         ),
     ]
 

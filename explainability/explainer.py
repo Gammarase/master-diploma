@@ -12,7 +12,7 @@ import dataclasses
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from exceptions import ExplainabilityError
 from logging_config import get_logger
@@ -25,6 +25,9 @@ from verification.aggregator import (
     VERDICT_UNCERTAIN,
     VerificationResult,
 )
+
+if TYPE_CHECKING:
+    from retrieval.evidence import RetrievalResult
 
 __all__ = ["Explainer", "ExplanationOutput"]
 
@@ -65,10 +68,18 @@ _UNCERTAIN_REASON_TEMPLATES = {
         "Manual review is recommended."
     ),
     REASON_NO_EVIDENCE: (
-        "No sufficiently relevant evidence was found for this claim, so it "
-        "cannot be verified. Manual review is recommended."
+        "No sufficiently relevant evidence from trusted sources was found for "
+        "this claim, so it cannot be verified. Manual review is recommended."
     ),
 }
+
+# Used instead of the no_evidence text when the search itself failed.
+_SEARCH_UNAVAILABLE_TEMPLATE = (
+    "The evidence search could not be performed (the search service was "
+    "unreachable or rate-limited), so the claim could not be checked against "
+    "any sources. Retry later or review the claim manually."
+)
+_STATUS_UNAVAILABLE = "unavailable"
 
 _LLM_ASSESSMENT_LABEL = "LLM assessment:"
 
@@ -114,11 +125,17 @@ class Explainer:
     def __init__(self, settings: "Settings | None" = None) -> None:  # noqa: F821
         self._settings = settings
 
-    def explain(self, verification_result: VerificationResult) -> ExplanationOutput:
+    def explain(
+        self,
+        verification_result: VerificationResult,
+        retrieval: "RetrievalResult | None" = None,
+    ) -> ExplanationOutput:
         """Generate a full explanation from a VerificationResult.
 
         Args:
             verification_result: Aggregated result from ResultAggregator.
+            retrieval: The retrieval result for the claim, used for the
+                search metadata and the "search unavailable" explanation.
 
         Returns:
             ExplanationOutput dataclass instance.
@@ -133,7 +150,8 @@ class Explainer:
             final_score = result.final_score
             language = result.claim.language
 
-            explanation_text = self._generate_explanation_text(result)
+            search_status = retrieval.status if retrieval is not None else None
+            explanation_text = self._generate_explanation_text(result, search_status)
             evidence_excerpts = self._format_evidence_excerpts(
                 result.retrieved_evidences, result.nli_results
             )
@@ -154,6 +172,10 @@ class Explainer:
                 "rag_confidence": result.rag_verdict.confidence,
                 "rag_raw_response": result.rag_verdict.raw_response,
                 "evidence_mode": self._evidence_mode(),
+                "search_backend": retrieval.backend if retrieval is not None else None,
+                "search_status": search_status,
+                "search_queries": list(retrieval.queries) if retrieval is not None else [],
+                "source_policy_mode": self._source_policy_mode(),
                 "models": self._model_names(),
             }
 
@@ -184,7 +206,9 @@ class Explainer:
                 "Failed to generate explanation", original_error=exc
             ) from exc
 
-    def _generate_explanation_text(self, result: VerificationResult) -> str:
+    def _generate_explanation_text(
+        self, result: VerificationResult, search_status: str | None = None
+    ) -> str:
         """Generate a 1–3 sentence explanation for the verdict.
 
         Incorporates the RAG reasoning if available, otherwise falls back
@@ -192,6 +216,7 @@ class Explainer:
 
         Args:
             result: VerificationResult to explain.
+            search_status: Search status of the retrieval, if known.
 
         Returns:
             Explanation string.
@@ -206,6 +231,11 @@ class Explainer:
             template = _UNCERTAIN_REASON_TEMPLATES.get(
                 result.uncertainty_reason or "", template
             )
+            if (
+                result.uncertainty_reason == REASON_NO_EVIDENCE
+                and search_status == _STATUS_UNAVAILABLE
+            ):
+                template = _SEARCH_UNAVAILABLE_TEMPLATE
         base_explanation = template.format(
             n=n_evidence, score=score, nli=result.nli_score, rag=result.rag_score
         )
@@ -223,11 +253,8 @@ class Explainer:
     ) -> list[dict[str, Any]]:
         """Format evidence passages into structured excerpt records.
 
-        Dataset labels are deliberately left out: they belong to the source
-        record's claim, not to the claim being verified.
-
         Args:
-            evidences: List of RetrievedEvidence from similarity search.
+            evidences: List of RetrievedEvidence from retrieval.
             nli_results: NLIResult objects in the same order as *evidences*.
 
         Returns:
@@ -262,19 +289,24 @@ class Explainer:
             evidences: List of RetrievedEvidence instances.
 
         Returns:
-            List of citation dicts with vector_id, split, claim_id,
-            passage_index, language and dataset.
+            List of citation dicts, in excerpt order, with the passage
+            index, URL, publisher, title, publication and retrieval dates,
+            source tier, trust and language.
         """
         return [
             {
-                "vector_id": ev.vector_id,
-                "split": ev.split,
-                "claim_id": ev.claim_id,
-                "passage_index": ev.passage_index,
+                "passage_index": idx,
+                "evidence_id": ev.evidence_id,
+                "url": ev.source_url,
+                "publisher": ev.publisher,
+                "title": ev.title,
+                "published_at": ev.published_at,
+                "retrieved_at": ev.retrieved_at,
+                "tier": ev.source_tier,
+                "trust": ev.trust,
                 "language": ev.language,
-                "dataset": "RU22Fact",
             }
-            for ev in evidences
+            for idx, ev in enumerate(evidences)
         ]
 
     def _evidence_mode(self) -> str | None:
@@ -282,12 +314,16 @@ class Explainer:
             return None
         return self._settings.ollama.evidence_mode
 
+    def _source_policy_mode(self) -> str | None:
+        if self._settings is None:
+            return None
+        return self._settings.source_policy.mode
+
     def _model_names(self) -> dict[str, str | None]:
         if self._settings is None:
-            return {"embeddings": None, "reranker": None, "nli": None, "llm": None}
+            return {"reranker": None, "nli": None, "llm": None}
         s = self._settings
         return {
-            "embeddings": s.embeddings.model_name,
             "reranker": s.retrieval.reranker_model,
             "nli": s.verification.nli_model,
             "llm": s.ollama.model,
