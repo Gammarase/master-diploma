@@ -27,9 +27,9 @@ search:
   backend: "searxng"
   base_url: "http://localhost:8080"
   timeout_seconds: 20
-  min_interval_seconds: 1.0
+  min_interval_seconds: 210     # ~1 search per 3.5 min: Brave refills ~1 search per 3 min (measured 2026-09-27)
   results_per_query: 10
-  site_filter: "grouped"       # grouped | per_domain | none (strict mode only)
+  site_filter: "grouped"       # grouped | per_domain | none (strict mode only); none = plain queries + policy post-filter
   site_group_size: 10
   fetch_timeout_seconds: 10
   max_page_bytes: 2000000
