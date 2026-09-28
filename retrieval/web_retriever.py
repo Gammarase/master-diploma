@@ -28,7 +28,10 @@ SearXNG setup
   every engine is suspended, SearXNG answers with no results and lists the
   engines in ``unresponsive_engines``; the claim's status is then
   ``unavailable`` and the failed request is not cached, so a later run
-  retries it. Enabling more engines (for example bing, mojeek, qwant,
+  retries it. The same applies when the suspended engines were the ones
+  honouring ``site:`` and the answer comes only from engines that ignore
+  it (no hit on the requested sites, plus engine errors): the response is
+  treated as failed rather than cached. Enabling more engines (for example bing, mojeek, qwant,
   startpage, wikipedia) spreads the load.
 * A claim needs up to ``retrieval.max_search_requests`` (default 8)
   requests on a cold cache, spaced ``search.min_interval_seconds`` apart.
@@ -275,8 +278,12 @@ class WebEvidenceRetriever:
                     else None
                 )
                 if cached is not None:
-                    responses.append((qi, SearchResponse.from_dict(cached)))
-                    continue
+                    cached_response = SearchResponse.from_dict(cached)
+                    # Entries cached before off-target detection existed
+                    # are skipped, so the request is sent again.
+                    if not cached_response.off_target(sites):
+                        responses.append((qi, cached_response))
+                        continue
                 if offline:
                     responses.append((qi, SearchResponse(query=full_query)))
                     continue
@@ -297,6 +304,16 @@ class WebEvidenceRetriever:
                     backend_down = isinstance(exc.original_error, httpx.TransportError)
                     continue
                 if response.failed:
+                    any_failed = True
+                    continue
+                if response.off_target(sites):
+                    logger.warning(
+                        "Search for '%s...' returned no hit on the requested "
+                        "sites while engines reported errors %s; treating it "
+                        "as failed.",
+                        query[:50],
+                        response.engine_errors,
+                    )
                     any_failed = True
                     continue
                 if self._cache is not None:

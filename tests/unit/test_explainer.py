@@ -12,6 +12,7 @@ from explainability.explainer import ExplanationOutput, Explainer
 from retrieval.evidence import RetrievalResult, RetrievedEvidence
 from verification.aggregator import (
     REASON_CONFLICT,
+    REASON_LLM_UNDECIDED,
     REASON_LOW_SCORE_MARGIN,
     REASON_NO_EVIDENCE,
     VERDICT_CONFIRMED,
@@ -300,6 +301,15 @@ class TestGenerateExplanationText:
         )
         text = explainer._generate_explanation_text(result)
         assert "too weak or mixed" in text
+
+    def test_llm_undecided_explanation(self, explainer: Explainer) -> None:
+        result = _make_verification_result(
+            verdict=VERDICT_UNCERTAIN, nli_score=0.86, rag_score=0.5,
+            reason=REASON_LLM_UNDECIDED,
+        )
+        text = explainer._generate_explanation_text(result)
+        assert "found the evidence insufficient" in text
+        assert "NLI score 0.86" in text
 
     def test_no_evidence_explanation(self, explainer: Explainer) -> None:
         result = _make_verification_result(

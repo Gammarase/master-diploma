@@ -17,7 +17,7 @@ from retrieval.evidence import RetrievedEvidence
 from retrieval.page_fetcher import FetchedPage
 from retrieval.source_policy import SourcePolicy
 from retrieval.web_retriever import WebEvidenceRetriever, normalize_url
-from retrieval.web_search import SearchHit, SearchResponse
+from retrieval.web_search import SearchHit, SearchResponse, build_query
 
 _CLAIM = "The IAEA confirmed shelling at the Zaporizhzhia plant."
 
@@ -565,6 +565,38 @@ class TestCache:
         backend = FakeBackend()
         _retriever(backend, cache=cache, search__site_filter="none").retrieve(_CLAIM, "en")
         assert len(backend.calls) == 1
+
+
+    def test_off_target_search_not_cached_or_used(self, tmp_path: Path) -> None:
+        cache = WebCache(tmp_path)
+        junk = SearchResponse(
+            query="q",
+            hits=_hits("https://dictionary.cambridge.org/huge"),
+            engine_errors=[["brave", "Suspended: too many requests"]],
+        )
+        result = _retriever(FakeBackend(lambda q, s: junk), cache=cache).retrieve(
+            _CLAIM, "en"
+        )
+        assert result.status == "unavailable"
+        backend = FakeBackend()
+        _retriever(backend, cache=cache).retrieve(_CLAIM, "en")
+        assert backend.calls  # nothing was cached, so the request is sent again
+
+    def test_off_target_cache_entry_is_retried(self, tmp_path: Path) -> None:
+        cache = WebCache(tmp_path)
+        junk = SearchResponse(
+            query="q",
+            hits=_hits("https://dictionary.cambridge.org/huge"),
+            engine_errors=[["brave", "Suspended: too many requests"]],
+        )
+        retriever = _retriever(FakeBackend(), cache=cache)
+        for sites in retriever.site_groups:
+            full = build_query(_CLAIM, sites)
+            cache.put_search("fake", full, "en", dataclasses.replace(junk, query=full).to_dict())
+        backend = FakeBackend(_static("https://apnews.com/a"))
+        result = _retriever(backend, cache=cache).retrieve(_CLAIM, "en")
+        assert backend.calls
+        assert result.status == "ok"
 
 
 def test_normalize_url() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -70,6 +71,27 @@ class SearchResponse:
     def failed(self) -> bool:
         """True when no hits came back because upstream engines failed."""
         return not self.hits and bool(self.engine_errors)
+
+    def off_target(self, sites: list[str] | None) -> bool:
+        """True when a ``site:``-filtered request came back degraded.
+
+        When the engines that honour ``site:`` are suspended, SearXNG may
+        still answer from engines that ignore the operators. Such a response
+        has engine errors and no hit on any requested site; it must be
+        treated as failed, not cached as a real result.
+
+        Args:
+            sites: Domains the request was restricted to; None for an open
+                search (never off-target).
+        """
+        if not sites or not self.engine_errors:
+            return False
+        domains = [s.split("/", 1)[0].lower() for s in sites if s]
+        for hit in self.hits:
+            host = (urlsplit(hit.url).hostname or "").lower()
+            if any(host == d or host.endswith("." + d) for d in domains):
+                return False
+        return True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

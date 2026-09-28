@@ -270,6 +270,17 @@ class VerificationSettings(BaseSettings):
     decisiveness_margin: float = Field(
         default_factory=_default_decisiveness_margin
     )
+    require_llm_decision: bool = Field(
+        default=_YAML.get("verification", {}).get("require_llm_decision", True)
+    )
+    llm_override_confidence: float | None = Field(
+        default=_YAML.get("verification", {}).get("llm_override_confidence", 0.8)
+    )
+    nli_ignore_support_tiers: list[str] = Field(
+        default=_YAML.get("verification", {}).get(
+            "nli_ignore_support_tiers", ["fact_checkers"]
+        )
+    )
 
     @model_validator(mode="before")
     @classmethod

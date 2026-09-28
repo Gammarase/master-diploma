@@ -56,6 +56,11 @@ class TestDefaults:
     def test_evidence_mode_defaults_to_web(self) -> None:
         assert OllamaSettings.model_fields["evidence_mode"].default == "web"
 
+    def test_llm_decision_and_ignored_tiers_from_yaml(self) -> None:
+        v = VerificationSettings()
+        assert v.require_llm_decision is True
+        assert v.nli_ignore_support_tiers == ["fact_checkers"]
+
     def test_margin_default_without_yaml(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

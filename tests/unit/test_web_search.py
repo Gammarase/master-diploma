@@ -174,6 +174,46 @@ class TestSerialization:
         assert SearchResponse.from_dict(resp.to_dict()) == resp
 
 
+class TestOffTarget:
+    _ERR = [["brave", "Suspended: too many requests"]]
+
+    def _resp(self, *urls: str, errors: list[list[str]] | None = None) -> SearchResponse:
+        return SearchResponse(
+            query="q",
+            hits=[SearchHit(url=u) for u in urls],
+            engine_errors=self._ERR if errors is None else errors,
+        )
+
+    def test_junk_hits_with_errors(self) -> None:
+        r = self._resp("https://dictionary.cambridge.org/huge", "https://www.huge.com/")
+        assert r.off_target(["reuters.com", "bbc.com"]) is True
+
+    def test_hit_on_requested_site(self) -> None:
+        r = self._resp("https://dictionary.cambridge.org/huge", "https://www.reuters.com/world/x")
+        assert r.off_target(["reuters.com", "bbc.com"]) is False
+
+    def test_subdomain_counts(self) -> None:
+        assert self._resp("https://news.bbc.co.uk/a").off_target(["bbc.co.uk"]) is False
+
+    def test_path_site_matches_domain(self) -> None:
+        r = self._resp("https://www.reuters.com/fact-check/x")
+        assert r.off_target(["reuters.com/fact-check"]) is False
+
+    def test_suffix_is_not_a_subdomain(self) -> None:
+        assert self._resp("https://notreuters.com/a").off_target(["reuters.com"]) is True
+
+    def test_no_engine_errors_is_not_off_target(self) -> None:
+        r = self._resp("https://www.huge.com/", errors=[])
+        assert r.off_target(["reuters.com"]) is False
+
+    def test_open_search_is_never_off_target(self) -> None:
+        assert self._resp("https://www.huge.com/").off_target(None) is False
+
+    def test_no_hits_with_errors(self) -> None:
+        # Also ``failed``; off_target agrees.
+        assert self._resp().off_target(["reuters.com"]) is True
+
+
 class TestHealthCheck:
     def test_ok(self) -> None:
         seen: list[httpx.Request] = []

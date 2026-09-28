@@ -41,7 +41,10 @@ def verifier(mock_settings: MagicMock, mock_cross_encoder: MagicMock) -> NLIVeri
 
 
 def _make_evidence(
-    text: str = "Evidence text.", score: float = 0.9, trust: float = 1.0
+    text: str = "Evidence text.",
+    score: float = 0.9,
+    trust: float = 1.0,
+    tier: str = "",
 ) -> RetrievedEvidence:
     return RetrievedEvidence(
         evidence_id="test-id",
@@ -49,14 +52,16 @@ def _make_evidence(
         evidence_text=text,
         language="en",
         trust=trust,
+        source_tier=tier,
     )
 
 
-def _result(support: float, trust: float = 1.0) -> NLIResult:
+def _result(support: float, trust: float = 1.0, tier: str = "") -> NLIResult:
     entail = max(0.0, support)
     contra = max(0.0, -support)
     return NLIResult(
-        "c", "e", entail, contra, 1 - entail - contra, "neutral", 0.5, trust=trust
+        "c", "e", entail, contra, 1 - entail - contra, "neutral", 0.5,
+        trust=trust, source_tier=tier,
     )
 
 
@@ -183,6 +188,17 @@ class TestVerifyBatch:
         results = verifier.verify_batch("Claim", evidences)
         assert [r.trust for r in results] == [1.0, 0.8, 0.3]
 
+    def test_results_carry_source_tier(
+        self, verifier: NLIVerifier, mock_cross_encoder: MagicMock
+    ) -> None:
+        mock_cross_encoder.predict.return_value = np.array([[0.8, 0.1, 0.1]] * 2)
+        evidences = [
+            _make_evidence("E0", tier="fact_checkers"),
+            _make_evidence("E1", tier="wire_agencies"),
+        ]
+        results = verifier.verify_batch("Claim", evidences)
+        assert [r.source_tier for r in results] == ["fact_checkers", "wire_agencies"]
+
     def test_verify_single_uses_full_trust(self, verifier: NLIVerifier) -> None:
         assert verifier.verify_single("Claim", "E").trust == 1.0
 
@@ -213,6 +229,30 @@ class TestAggregateNliScore:
     def test_trust_scales_toward_neutral(self) -> None:
         results = [_result(0.90, trust=0.8)]
         assert NLIVerifier.aggregate_nli_score(results) == pytest.approx(0.86, abs=0.001)
+
+    def test_fact_checker_support_ignored(self) -> None:
+        results = [_result(0.9, tier="fact_checkers"), _result(0.2)]
+        score = NLIVerifier.aggregate_nli_score(results, {"fact_checkers"})
+        assert score == pytest.approx(0.6)
+
+    def test_fact_checker_contradiction_kept(self) -> None:
+        results = [_result(-0.9, tier="fact_checkers"), _result(0.2)]
+        score = NLIVerifier.aggregate_nli_score(results, {"fact_checkers"})
+        assert score == pytest.approx(0.05)
+
+    def test_other_tiers_unaffected_by_ignore_list(self) -> None:
+        results = [_result(0.9, tier="major_outlets")]
+        score = NLIVerifier.aggregate_nli_score(results, {"fact_checkers"})
+        assert score == pytest.approx(0.95)
+
+    def test_only_ignored_support_gives_neutral(self) -> None:
+        results = [_result(0.9, tier="fact_checkers")]
+        score = NLIVerifier.aggregate_nli_score(results, {"fact_checkers"})
+        assert score == pytest.approx(0.5)
+
+    def test_tiers_not_ignored_by_default(self) -> None:
+        results = [_result(0.9, tier="fact_checkers")]
+        assert NLIVerifier.aggregate_nli_score(results) == pytest.approx(0.95)
 
     def test_default_trust_is_one(self) -> None:
         assert NLIResult("c", "e", 0.5, 0.1, 0.4, "entailment", 0.5).trust == 1.0

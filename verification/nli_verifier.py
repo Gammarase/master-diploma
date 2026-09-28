@@ -8,6 +8,7 @@ retrieved evidence (premise) and the claim (hypothesis).
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,7 @@ class NLIResult:
         confidence: The highest of the three scores.
         support: Signed support ``p_entailment - p_contradiction`` in [-1, 1].
         trust: Source trust of the passage in [0, 1], used for weighting.
+        source_tier: Source-policy tier of the passage ("" when unknown).
     """
 
     claim: str
@@ -47,6 +49,7 @@ class NLIResult:
     confidence: float
     support: float | None = None
     trust: float = 1.0
+    source_tier: str = ""
 
     def __post_init__(self) -> None:
         if self.support is None:
@@ -115,7 +118,7 @@ class NLIVerifier:
 
         Returns:
             List of NLIResult, one per evidence passage, in passage order,
-            each carrying its passage's source trust.
+            each carrying its passage's source trust and tier.
 
         Raises:
             NLIError: On batch inference failure.
@@ -126,10 +129,15 @@ class NLIVerifier:
             claim,
             [ev.evidence_text for ev in evidences],
             [float(getattr(ev, "trust", 1.0)) for ev in evidences],
+            [str(getattr(ev, "source_tier", "") or "") for ev in evidences],
         )
 
     def _infer(
-        self, claim: str, premises: list[str], trusts: list[float] | None = None
+        self,
+        claim: str,
+        premises: list[str],
+        trusts: list[float] | None = None,
+        tiers: list[str] | None = None,
     ) -> list[NLIResult]:
         """Score ``(premise, claim)`` pairs and build NLIResults."""
         try:
@@ -146,8 +154,12 @@ class NLIVerifier:
 
         if trusts is None:
             trusts = [1.0] * len(premises)
+        if tiers is None:
+            tiers = [""] * len(premises)
         results: list[NLIResult] = []
-        for scores, premise, trust in zip(scores_batch, premises, trusts):
+        for scores, premise, trust, tier in zip(
+            scores_batch, premises, trusts, tiers
+        ):
             label_scores = {
                 label: float(scores[label_map[label]]) for label in _NLI_LABELS
             }
@@ -162,12 +174,16 @@ class NLIVerifier:
                     predicted_label=predicted_label,
                     confidence=label_scores[predicted_label],
                     trust=trust,
+                    source_tier=tier,
                 )
             )
         return results
 
     @staticmethod
-    def aggregate_nli_score(results: list[NLIResult]) -> float:
+    def aggregate_nli_score(
+        results: list[NLIResult],
+        ignore_support_tiers: Collection[str] = frozenset(),
+    ) -> float:
         """Convert per-passage NLI results into one truthfulness score.
 
         Each passage's signed support ``s`` is weighted by its source trust
@@ -176,17 +192,29 @@ class NLIVerifier:
         diluted by merely related ones, and a low-trust page cannot outweigh
         a strong passage from a trusted source.
 
+        Positive support from passages in *ignore_support_tiers* counts as 0:
+        a fact-check quotes the claim it debunks, which NLI reads as
+        entailment. Their contradiction still counts.
+
         Args:
             results: NLI results for a claim against its evidence passages.
+            ignore_support_tiers: Source tiers whose positive support is
+                ignored (e.g. ``{"fact_checkers"}``).
 
         Returns:
             Float in [0, 1]; 0.5 when there are no results.
         """
         if not results:
             return 0.5
-        strongest = max(
-            (r.trust * (r.support or 0.0) for r in results), key=abs
-        )
+        ignored = set(ignore_support_tiers)
+
+        def weighted(r: NLIResult) -> float:
+            support = r.support or 0.0
+            if support > 0 and r.source_tier in ignored:
+                support = 0.0
+            return r.trust * support
+
+        strongest = max((weighted(r) for r in results), key=abs)
         return max(0.0, min(1.0, (1.0 + strongest) / 2.0))
 
     @staticmethod

@@ -9,6 +9,7 @@ import pytest
 from retrieval.evidence import RetrievedEvidence
 from verification.aggregator import (
     REASON_CONFLICT,
+    REASON_LLM_UNDECIDED,
     REASON_LOW_SCORE_MARGIN,
     REASON_NO_EVIDENCE,
     VERDICT_CONFIRMED,
@@ -40,6 +41,9 @@ def mock_settings() -> MagicMock:
     settings.verification.thresholds.disinformation = 0.35
     settings.verification.thresholds.confirmed = 0.65
     settings.verification.decisiveness_margin = 0.15
+    settings.verification.require_llm_decision = True
+    settings.verification.llm_override_confidence = 0.8
+    settings.verification.nli_ignore_support_tiers = ["fact_checkers"]
     return settings
 
 
@@ -66,9 +70,12 @@ def _evidences(n: int = 2) -> list[RetrievedEvidence]:
     ]
 
 
-def _nli(entail: float, contra: float) -> NLIResult:
+def _nli(entail: float, contra: float, tier: str = "") -> NLIResult:
     label = "entailment" if entail >= contra else "contradiction"
-    return NLIResult("c", "e", entail, contra, 1 - entail - contra, label, max(entail, contra))
+    return NLIResult(
+        "c", "e", entail, contra, 1 - entail - contra, label, max(entail, contra),
+        source_tier=tier,
+    )
 
 
 # ─── Spec scenarios: specs/verdict-aggregation/spec.md ───────────────────────
@@ -93,8 +100,17 @@ class TestAdaptiveWeighting:
 
     def test_rag_undecided_nli_confident(self) -> None:
         d = decide(0.90, 0.50, 3, CFG)
+        assert d.verdict == VERDICT_UNCERTAIN
+        assert d.reason == REASON_LLM_UNDECIDED
+        assert d.effective_weights == pytest.approx({"nli": 0.3, "rag": 0.7})
+        assert d.final_score == pytest.approx(0.3 * 0.9 + 0.7 * 0.5)
+
+    def test_rag_undecided_nli_decides_when_llm_not_required(self) -> None:
+        cfg = DecisionConfig(0.3, 0.7, 0.35, 0.65, 0.15, require_llm_decision=False)
+        d = decide(0.90, 0.50, 3, cfg)
         assert d.final_score == pytest.approx(0.90)
         assert d.effective_weights == {"nli": 1.0, "rag": 0.0}
+        assert d.verdict == VERDICT_CONFIRMED
 
     def test_both_decisive_and_agreeing(self) -> None:
         d = decide(0.80, 0.90, 3, CFG)
@@ -125,9 +141,47 @@ class TestAdaptiveWeighting:
 
 class TestConflictRule:
     def test_opposite_decisive_components(self) -> None:
-        d = decide(0.10, 0.90, 3, CFG)
+        d = decide(0.10, 0.75, 3, CFG)
         assert d.verdict == VERDICT_UNCERTAIN
         assert d.reason == REASON_CONFLICT
+
+
+class TestLlmOverride:
+    def test_confident_llm_overrides_nli(self) -> None:
+        d = decide(0.03, 0.95, 3, CFG)
+        assert d.verdict == VERDICT_CONFIRMED
+        assert d.reason is None
+        assert d.effective_weights == {"nli": 0.0, "rag": 1.0}
+        assert d.final_score == pytest.approx(0.95)
+
+    def test_override_towards_disinformation(self) -> None:
+        d = decide(0.90, 0.10, 3, CFG)
+        assert d.verdict == VERDICT_DISINFORMATION
+
+    def test_override_at_exact_confidence(self) -> None:
+        # REFUTED with confidence 0.8 -> score 1 - 0.8 (float error included).
+        d = decide(0.90, 1 - 0.8, 3, CFG)
+        assert d.verdict == VERDICT_DISINFORMATION
+        assert d.reason is None
+
+    def test_no_override_below_confidence(self) -> None:
+        d = decide(0.03, 0.75, 3, CFG)
+        assert d.reason == REASON_CONFLICT
+
+    def test_override_disabled(self) -> None:
+        cfg = DecisionConfig(0.3, 0.7, 0.35, 0.65, 0.15, llm_override_confidence=None)
+        assert decide(0.03, 0.95, 3, cfg).reason == REASON_CONFLICT
+
+    def test_override_still_uses_thresholds(self) -> None:
+        cfg = DecisionConfig(0.3, 0.7, 0.35, 0.90, 0.15, llm_override_confidence=0.8)
+        d = decide(0.03, 0.85, 3, cfg)
+        assert d.verdict == VERDICT_UNCERTAIN
+        assert d.reason == REASON_LOW_SCORE_MARGIN
+
+    def test_no_override_without_conflict(self) -> None:
+        # Agreeing components keep the configured weights.
+        d = decide(0.80, 0.90, 3, CFG)
+        assert d.effective_weights == pytest.approx({"nli": 0.3, "rag": 0.7})
 
     def test_confident_rag_with_neutral_nli_is_not_conflict(self) -> None:
         d = decide(0.50, 0.05, 3, CFG)
@@ -143,10 +197,28 @@ class TestConflictRule:
 
 class TestThresholds:
     def test_middle_score_low_margin(self) -> None:
+        # Wider band than the decisiveness margin, e.g. after calibration.
+        cfg = DecisionConfig(0.3, 0.7, 0.25, 0.75, 0.15)
+        d = decide(0.50, 0.70, 3, cfg)
+        assert d.final_score == pytest.approx(0.70)
+        assert d.verdict == VERDICT_UNCERTAIN
+        assert d.reason == REASON_LOW_SCORE_MARGIN
+
+    def test_undecided_llm(self) -> None:
         d = decide(0.50, 0.50, 3, CFG)
         assert d.final_score == pytest.approx(0.50)
         assert d.verdict == VERDICT_UNCERTAIN
-        assert d.reason == REASON_LOW_SCORE_MARGIN
+        assert d.reason == REASON_LLM_UNDECIDED
+
+    def test_no_evidence_takes_precedence_over_undecided_llm(self) -> None:
+        d = decide(0.90, 0.50, 0, CFG)
+        assert d.reason == REASON_NO_EVIDENCE
+
+    def test_strong_nli_alone_is_undecided(self) -> None:
+        # Strong NLI contradiction alone must not produce DISINFORMATION.
+        d = decide(0.03, 0.50, 3, CFG)
+        assert d.verdict == VERDICT_UNCERTAIN
+        assert d.reason == REASON_LLM_UNDECIDED
 
     def test_empty_evidence(self) -> None:
         d = decide(0.95, 0.95, 0, CFG)
@@ -193,7 +265,7 @@ class TestResultAggregator:
         self, aggregator: ResultAggregator, mock_claim: MagicMock
     ) -> None:
         nli_results = [_nli(0.0, 0.95)]  # nli score 0.025
-        rag = _make_rag("SUPPORTED", 0.9)
+        rag = _make_rag("SUPPORTED", 0.75)  # below the override confidence
         result = aggregator.aggregate(mock_claim, nli_results, rag, _evidences())
         assert result.verdict == VERDICT_UNCERTAIN
         assert result.uncertainty_reason == REASON_CONFLICT
@@ -217,6 +289,16 @@ class TestResultAggregator:
             mock_claim, nli_results, _make_rag("INSUFFICIENT_EVIDENCE", 0.5), _evidences(3)
         )
         assert result.nli_score == pytest.approx(0.10)
+
+    def test_fact_checker_support_ignored(
+        self, aggregator: ResultAggregator, mock_claim: MagicMock
+    ) -> None:
+        # A debunk quoting the fake reads as entailment; it must not count.
+        nli_results = [_nli(0.95, 0.0, tier="fact_checkers"), _nli(0.1, 0.1)]
+        rag = _make_rag("REFUTED", 0.95)
+        result = aggregator.aggregate(mock_claim, nli_results, rag, _evidences())
+        assert result.nli_score == pytest.approx(0.5)
+        assert result.verdict == VERDICT_DISINFORMATION
 
     def test_component_weights_stored(
         self, aggregator: ResultAggregator, mock_claim: MagicMock

@@ -69,6 +69,10 @@ verification:
     disinformation: 0.35
     confirmed: 0.65
   decisiveness_margin: 0.15
+  require_llm_decision: true   # UNCERTAIN unless the LLM is decisive; false = NLI may decide alone (ablation)
+  llm_override_confidence: 0.8  # in a conflict, an LLM this confident overrides NLI; null disables, 0.9 = stricter
+  nli_ignore_support_tiers:    # NLI support from these tiers is ignored: debunks quote the claim they refute
+    - fact_checkers
 
 logging:
   level: "INFO"

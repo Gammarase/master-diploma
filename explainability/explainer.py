@@ -18,6 +18,7 @@ from exceptions import ExplainabilityError
 from logging_config import get_logger
 from verification.aggregator import (
     REASON_CONFLICT,
+    REASON_LLM_UNDECIDED,
     REASON_LOW_SCORE_MARGIN,
     REASON_NO_EVIDENCE,
     VERDICT_CONFIRMED,
@@ -65,6 +66,12 @@ _UNCERTAIN_REASON_TEMPLATES = {
     REASON_LOW_SCORE_MARGIN: (
         "The evidence is too weak or mixed for a firm verdict "
         "(overall score {score:.2f}, based on {n} evidence passage(s)). "
+        "Manual review is recommended."
+    ),
+    REASON_LLM_UNDECIDED: (
+        "The LLM analysis found the evidence insufficient to settle the claim "
+        "(NLI score {nli:.2f}, LLM score {rag:.2f}, based on {n} evidence "
+        "passage(s)); the NLI signal alone is not trusted for a verdict. "
         "Manual review is recommended."
     ),
     REASON_NO_EVIDENCE: (
