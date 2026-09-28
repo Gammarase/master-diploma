@@ -74,6 +74,9 @@ data/datasets/
 pinecone_cache/
 ollama_cache/
 
+#  Web API job database
+var/
+
 #  Web evidence cache (search results + extracted pages)
 cache/
 
@@ -82,4 +85,4 @@ cache/
 CLAUDE.md
 CLAUDE.local.md
 openspec/
-docs/
+/docs/
