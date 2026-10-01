@@ -7,6 +7,7 @@ untouched.
 
 from __future__ import annotations
 
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["ApiSettings"]
@@ -24,6 +25,9 @@ class ApiSettings(BaseSettings):
         poll_interval_seconds: How often a long-poll request re-reads the store.
         host: Interface the server binds to.
         port: Port the server listens on.
+        basic_auth_username: HTTP Basic username; auth is off when both
+            username and password are empty.
+        basic_auth_password: HTTP Basic password.
     """
 
     model_config = SettingsConfigDict(env_prefix="API_")
@@ -36,3 +40,5 @@ class ApiSettings(BaseSettings):
     poll_interval_seconds: float = 0.5
     host: str = "0.0.0.0"
     port: int = 8000
+    basic_auth_username: str = ""
+    basic_auth_password: SecretStr = SecretStr("")

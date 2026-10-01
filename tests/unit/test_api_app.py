@@ -219,9 +219,10 @@ def test_queue_position_for_second_check(client: TestClient, pipeline: FakePipel
     assert pipeline.started.wait(5)
     wait_status(client, first, "running")
     second = submit(client).json()["id"]
-    third = submit(client).json()["id"]
+    third = submit(client, "  Third text.  ").json()["id"]
     body = client.get(f"/api/v1/checks/{third}").json()
     assert body["status"] == "queued"
+    assert body["text"] == "Third text."
     assert body["queue_position"] == 2
     assert body["results"] is None
     assert client.get(f"/api/v1/checks/{second}").json()["queue_position"] == 1
@@ -232,6 +233,7 @@ def test_completed_response_shape(client: TestClient) -> None:
     check_id = submit(client).json()["id"]
     body = wait_status(client, check_id, "completed")
     assert body["status"] == "completed"
+    assert body["text"] == "The Kakhovka dam was destroyed on 6 June 2023."
     assert body["error"] is None
     assert body["queue_position"] is None
     assert body["started_at"] and body["finished_at"]

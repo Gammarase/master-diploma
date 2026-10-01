@@ -133,6 +133,7 @@ class CheckStatusResponse(BaseModel):
                 {
                     "id": _EXAMPLE_ID,
                     "status": "completed",
+                    "text": "The Kakhovka dam was destroyed in 2023.",
                     "created_at": "2026-09-28T01:36:47.909900+00:00",
                     "started_at": "2026-09-28T01:36:47.912753+00:00",
                     "finished_at": "2026-09-28T01:39:41.079260+00:00",
@@ -192,6 +193,7 @@ class CheckStatusResponse(BaseModel):
             "(results ready) or `failed` (see `error`)."
         )
     )
+    text: str = Field(description="Submitted text (whitespace-trimmed).")
     created_at: str = Field(description="Submission time, ISO 8601 UTC.")
     started_at: str | None = Field(description="Time the analysis started; `null` while queued.")
     finished_at: str | None = Field(description="Time the analysis ended; `null` until then.")

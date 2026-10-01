@@ -1,0 +1,18 @@
+# CPU-only variant: removes the NVIDIA GPU reservations and runs the
+# reranker on CPU. Layer it on top of docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.no-gpu.yml \
+#     --env-file docker/.env up -d --build
+#
+# The LLM then runs on CPU too: pick a small model in docker/.env
+# (e.g. OLLAMA_MODEL=qwen3:4b); qwen3:14b needs ~10 GB RAM and is very slow.
+# Requires Docker Compose v2.24+ (for !reset).
+
+services:
+  ollama:
+    deploy: !reset {}
+
+  app:
+    deploy: !reset {}
+    environment:
+      RETRIEVAL_DEVICE: cpu

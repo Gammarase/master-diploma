@@ -47,6 +47,18 @@ function formatElapsed(ms) {
   return `${m}:${s}`;
 }
 
+// Submission-to-finish time from the server timestamps, so a check
+// reopened later shows how long it took, not how long ago it was sent.
+function finishedDuration(check) {
+  const created = Date.parse(check.created_at);
+  const finished = Date.parse(check.finished_at);
+  const ms =
+    Number.isNaN(created) || Number.isNaN(finished)
+      ? Date.now() - startedAt
+      : finished - created;
+  return Math.max(0, ms);
+}
+
 function renderStatus() {
   statusEl.textContent = `${lastStatus} · ${formatElapsed(Date.now() - startedAt)}`;
 }
@@ -167,11 +179,12 @@ async function waitForCheck(id) {
     if (!timerStarted) {
       startTimer(check.created_at);
       timerStarted = true;
+      if (typeof check.text === "string") textArea.value = check.text;
     }
     lastStatus = describe(check);
     renderStatus();
     if (check.status === "completed" || check.status === "failed") {
-      const elapsed = formatElapsed(Date.now() - startedAt);
+      const elapsed = formatElapsed(finishedDuration(check));
       finish();
       statusEl.textContent = `${check.status === "completed" ? "Done" : "Failed"} in ${elapsed}`;
       renderFinished(check);

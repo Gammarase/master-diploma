@@ -22,6 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from api.auth import BasicAuthMiddleware
 from api.schemas import (
     CheckStatusResponse,
     ErrorResponse,
@@ -57,7 +58,8 @@ Analysis takes minutes, so the API is asynchronous:
    it until `status` is `completed` or `failed`.
 
 Checks run one at a time in submission order and are kept across restarts.
-The API has no authentication; expose it only on a trusted network.
+When `API_BASIC_AUTH_USERNAME` and `API_BASIC_AUTH_PASSWORD` are set, every
+endpoint requires HTTP Basic authentication.
 """
 
 
@@ -164,6 +166,7 @@ def create_app(
         return CheckStatusResponse(
             id=record.id,
             status=record.status,
+            text=record.text,
             created_at=record.created_at,
             started_at=record.started_at,
             finished_at=record.finished_at,
@@ -294,6 +297,16 @@ def create_app(
         return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    username = cfg.basic_auth_username
+    password = cfg.basic_auth_password.get_secret_value()
+    if bool(username) != bool(password):
+        raise ValueError(
+            "Set both API_BASIC_AUTH_USERNAME and API_BASIC_AUTH_PASSWORD, or neither."
+        )
+    if username:
+        app.add_middleware(BasicAuthMiddleware, username=username, password=password)
+        logger.info("Basic auth enabled")
     return app
 
 

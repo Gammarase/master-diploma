@@ -15,7 +15,8 @@ info:
        it until `status` is `completed` or `failed`.
 
     Checks run one at a time in submission order and are kept across restarts.
-    The API has no authentication; expose it only on a trusted network.
+    When `API_BASIC_AUTH_USERNAME` and `API_BASIC_AUTH_PASSWORD` are set, every
+    endpoint requires HTTP Basic authentication.
   version: 1.0.0
 paths:
   /api/v1/checks:
@@ -127,6 +128,10 @@ components:
           title: Status
           description: '`queued` (waiting), `running` (being analysed), `completed` (results ready) or
             `failed` (see `error`).'
+        text:
+          type: string
+          title: Text
+          description: Submitted text (whitespace-trimmed).
         created_at:
           type: string
           title: Created At
@@ -168,6 +173,7 @@ components:
       required:
       - id
       - status
+      - text
       - created_at
       - started_at
       - finished_at
@@ -213,6 +219,7 @@ components:
           verdict: CONFIRMED
         started_at: '2026-09-28T01:36:47.912753+00:00'
         status: completed
+        text: The Kakhovka dam was destroyed in 2023.
     Citation:
       properties:
         passage_index:
