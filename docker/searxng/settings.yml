@@ -1,0 +1,31 @@
+# Read the documentation before extending the defaults:
+# https://docs.searxng.org/admin/settings/
+#
+# The secret key is not stored here: SearXNG reads it from the
+# SEARXNG_SECRET environment variable (set in docker/.env).
+
+use_default_settings: true
+
+server:
+  image_proxy: true
+
+search:
+  formats:
+    - html
+    - json
+  suspended_times:
+    SearxEngineAccessDenied: 3600
+    SearxEngineCaptcha: 3600
+    SearxEngineTooManyRequests: 600
+
+engines:
+  - name: bing
+    disabled: false
+  - name: mojeek
+    disabled: false
+  - name: qwant
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false

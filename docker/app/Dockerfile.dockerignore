@@ -1,0 +1,34 @@
+# Build-context exclusions for docker/app/Dockerfile (BuildKit reads this
+# file instead of a root .dockerignore).
+.git
+.gitignore
+.venv
+venv
+env
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.idea
+.vscode
+.claude
+cache
+logs
+var
+notebooks
+jupyter
+docs
+openspec
+data/datasets
+tests
+docker
+docker-compose.yml
+*.ipynb
+*.egg-info
+.jupyter
+.jupyter_ystore.db
+.env
+**/.env

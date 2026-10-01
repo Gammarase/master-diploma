@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from logging_config import get_logger
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievedEvidence
 from verification.nli_verifier import NLIResult, NLIVerifier
 from verification.rag_verifier import RAGVerdict
 
@@ -36,6 +36,7 @@ __all__ = [
     "REASON_CONFLICT",
     "REASON_LOW_SCORE_MARGIN",
     "REASON_NO_EVIDENCE",
+    "REASON_LLM_UNDECIDED",
 ]
 
 logger = get_logger(__name__)
@@ -47,6 +48,7 @@ VERDICT_CONFIRMED = "CONFIRMED"
 REASON_CONFLICT = "conflict"
 REASON_LOW_SCORE_MARGIN = "low_score_margin"
 REASON_NO_EVIDENCE = "no_evidence"
+REASON_LLM_UNDECIDED = "llm_undecided"
 
 
 @dataclass(frozen=True)
@@ -60,6 +62,11 @@ class DecisionConfig:
         threshold_confirmed: Scores at or above this are CONFIRMED.
         decisiveness_margin: A component ``x`` is decisive when
             ``|x - 0.5| > decisiveness_margin``.
+        require_llm_decision: When True, a verdict needs a decisive LLM
+            score; NLI alone never decides.
+        llm_override_confidence: In a conflict, an LLM at least this
+            confident (RAG score >= it or <= 1 - it) overrides NLI; None
+            keeps every conflict UNCERTAIN.
     """
 
     nli_weight: float
@@ -67,6 +74,8 @@ class DecisionConfig:
     threshold_disinformation: float
     threshold_confirmed: float
     decisiveness_margin: float
+    require_llm_decision: bool = True
+    llm_override_confidence: float | None = 0.8
 
     @classmethod
     def from_settings(cls, settings: "Settings") -> "DecisionConfig":  # noqa: F821
@@ -77,6 +86,12 @@ class DecisionConfig:
             threshold_disinformation=float(cfg.thresholds.disinformation),
             threshold_confirmed=float(cfg.thresholds.confirmed),
             decisiveness_margin=float(cfg.decisiveness_margin),
+            require_llm_decision=bool(cfg.require_llm_decision),
+            llm_override_confidence=(
+                None
+                if cfg.llm_override_confidence is None
+                else float(cfg.llm_override_confidence)
+            ),
         )
 
 
@@ -97,6 +112,10 @@ class Decision:
     effective_weights: dict[str, float]
 
 
+# Tolerance for comparing confidences that come from floats (0.8 vs 0.8000001).
+_EPS = 1e-9
+
+
 def is_decisive(score: float, margin: float) -> bool:
     """True when *score* is further than *margin* from the neutral 0.5."""
     return abs(score - 0.5) > margin
@@ -109,12 +128,20 @@ def decide(
 
     Rules (see specs/verdict-aggregation/spec.md):
 
-    - Weights are normalised to sum to 1. If exactly one component is
+    - Weights are normalised to sum to 1. If only the RAG component is
       decisive, it receives all the weight; otherwise the configured weights
-      apply.
+      apply. (With ``require_llm_decision`` off, a lone decisive NLI score
+      also receives all the weight.)
     - With no evidence the verdict is UNCERTAIN (``no_evidence``).
+    - With ``require_llm_decision`` on and a RAG score that is not decisive
+      (e.g. INSUFFICIENT_EVIDENCE) the verdict is UNCERTAIN
+      (``llm_undecided``): NLI alone mistakes passages that quote or report a
+      claim for support of it.
     - If both components are decisive and on opposite sides of 0.5 the
-      verdict is UNCERTAIN (``conflict``).
+      verdict is UNCERTAIN (``conflict``), unless the LLM is at least
+      ``llm_override_confidence`` confident: then the RAG score alone
+      decides. NLI misreads passages about related but different subjects
+      as contradiction, which a confident LLM does not.
     - Otherwise thresholds apply; the middle band is UNCERTAIN
       (``low_score_margin``).
 
@@ -135,9 +162,18 @@ def decide(
 
     nli_decisive = is_decisive(nli, cfg.decisiveness_margin)
     rag_decisive = is_decisive(rag, cfg.decisiveness_margin)
-    if nli_decisive and not rag_decisive:
+    if nli_decisive and not rag_decisive and not cfg.require_llm_decision:
         w_nli, w_rag = 1.0, 0.0
     elif rag_decisive and not nli_decisive:
+        w_nli, w_rag = 0.0, 1.0
+
+    conflict = nli_decisive and rag_decisive and (nli - 0.5) * (rag - 0.5) < 0
+    override = (
+        conflict
+        and cfg.llm_override_confidence is not None
+        and abs(rag - 0.5) >= cfg.llm_override_confidence - 0.5 - _EPS
+    )
+    if override:
         w_nli, w_rag = 0.0, 1.0
 
     final_score = max(0.0, min(1.0, w_nli * nli + w_rag * rag))
@@ -145,7 +181,9 @@ def decide(
 
     if n_evidence <= 0:
         return Decision(final_score, VERDICT_UNCERTAIN, REASON_NO_EVIDENCE, weights)
-    if nli_decisive and rag_decisive and (nli - 0.5) * (rag - 0.5) < 0:
+    if cfg.require_llm_decision and not rag_decisive:
+        return Decision(final_score, VERDICT_UNCERTAIN, REASON_LLM_UNDECIDED, weights)
+    if conflict and not override:
         return Decision(final_score, VERDICT_UNCERTAIN, REASON_CONFLICT, weights)
     if final_score < cfg.threshold_disinformation:
         return Decision(final_score, VERDICT_DISINFORMATION, None, weights)
@@ -168,8 +206,9 @@ class VerificationResult:
         rag_verdict: The full RAG verdict dataclass.
         retrieved_evidences: Evidence passages used for verification.
         component_weights: Configured weights.
-        uncertainty_reason: ``conflict``, ``low_score_margin`` or
-            ``no_evidence`` for UNCERTAIN verdicts, else None.
+        uncertainty_reason: ``conflict``, ``low_score_margin``,
+            ``no_evidence`` or ``llm_undecided`` for UNCERTAIN verdicts,
+            else None.
         effective_weights: Weights actually applied to the scores.
     """
 
@@ -204,6 +243,9 @@ class ResultAggregator:
     def __init__(self, settings: "Settings") -> None:  # noqa: F821
         self._settings = settings
         self._config = DecisionConfig.from_settings(settings)
+        self._ignore_support_tiers = frozenset(
+            settings.verification.nli_ignore_support_tiers or ()
+        )
 
     @property
     def config(self) -> DecisionConfig:
@@ -228,7 +270,9 @@ class ResultAggregator:
         Returns:
             A fully populated VerificationResult.
         """
-        nli_score = NLIVerifier.aggregate_nli_score(nli_results)
+        nli_score = NLIVerifier.aggregate_nli_score(
+            nli_results, self._ignore_support_tiers
+        )
         rag_score = rag_verdict.to_score()
         decision = decide(
             nli_score, rag_score, len(retrieved_evidences), self._config

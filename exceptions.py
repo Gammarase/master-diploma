@@ -13,8 +13,8 @@ __all__ = [
     "ClaimExtractionError",
     "EmbeddingError",
     "VectorStoreError",
-    "PineconeConnectionError",
-    "PineconeUpsertError",
+    "RetrievalError",
+    "SearchBackendError",
     "VerificationError",
     "NLIError",
     "RAGVerifierError",
@@ -56,15 +56,15 @@ class EmbeddingError(DisinfoDetectionError):
 
 
 class VectorStoreError(DisinfoDetectionError):
-    """Raised for general vector store failures."""
+    """Raised when the reranker model fails to load or run."""
 
 
-class PineconeConnectionError(VectorStoreError):
-    """Raised when connection to Pinecone cannot be established."""
+class RetrievalError(DisinfoDetectionError):
+    """Raised for web evidence retrieval failures."""
 
 
-class PineconeUpsertError(VectorStoreError):
-    """Raised when upserting vectors to Pinecone fails."""
+class SearchBackendError(RetrievalError):
+    """Raised when the search backend is unreachable or misconfigured."""
 
 
 class VerificationError(DisinfoDetectionError):

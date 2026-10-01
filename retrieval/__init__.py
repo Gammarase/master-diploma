@@ -1,17 +1,21 @@
 """
 Retrieval module for the Disinformation Detection System.
 
-Exports EmbeddingModel, Reranker, PineconeVectorStore, and related dataclasses.
+Exports the web evidence retriever, the source policy, the reranker, the
+passage chunker and the evidence dataclasses.
 """
 
-from retrieval.embeddings import EmbeddingModel
+from retrieval.chunking import chunk_evidence
+from retrieval.evidence import RetrievalResult, RetrievedEvidence
 from retrieval.reranker import Reranker
-from retrieval.vector_store import EvidenceDocument, PineconeVectorStore, RetrievedEvidence
+from retrieval.source_policy import SourcePolicy
+from retrieval.web_retriever import WebEvidenceRetriever
 
 __all__ = [
-    "EmbeddingModel",
-    "Reranker",
-    "PineconeVectorStore",
-    "EvidenceDocument",
     "RetrievedEvidence",
+    "RetrievalResult",
+    "WebEvidenceRetriever",
+    "SourcePolicy",
+    "Reranker",
+    "chunk_evidence",
 ]

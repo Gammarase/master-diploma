@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Disinformation Check</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Disinformation Check</h1>
+      <p class="lead">Paste a news text. Each check-worthy claim is verified against web evidence and a local LLM.</p>
+    </header>
+
+    <form id="check-form" novalidate>
+      <label for="news-text" class="visually-hidden">News text</label>
+      <textarea id="news-text" name="text" rows="8" placeholder="Paste a news text here…"></textarea>
+      <div class="actions">
+        <button id="verify" type="submit" disabled>Verify</button>
+        <span id="status" class="status" role="status" aria-live="polite"></span>
+      </div>
+      <p id="form-error" class="error" role="alert" hidden></p>
+    </form>
+
+    <section id="results" aria-live="polite"></section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

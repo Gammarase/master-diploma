@@ -1,0 +1,432 @@
+openapi: 3.1.0
+info:
+  title: Disinformation Detection API
+  description: |
+    Checks news texts for disinformation. The service extracts the check-worthy
+    claims from a text, searches trusted web sources for evidence, and gives each
+    claim a verdict (`CONFIRMED`, `DISINFORMATION` or `UNCERTAIN`) with an
+    explanation and the cited sources.
+
+    Analysis takes minutes, so the API is asynchronous:
+
+    1. `POST /api/v1/checks` submits a text and returns a check `id` at once.
+    2. `GET /api/v1/checks/{id}?wait=25` returns the status. The request is held
+       until the check finishes or `wait` seconds pass (long polling), so repeat
+       it until `status` is `completed` or `failed`.
+
+    Checks run one at a time in submission order and are kept across restarts.
+    The API has no authentication; expose it only on a trusted network.
+  version: 1.0.0
+paths:
+  /api/v1/checks:
+    post:
+      tags:
+      - checks
+      summary: Submit a text for checking
+      description: Queues the text and returns at once, without waiting for the analysis. The `Location`
+        header holds the URL of the new check.
+      operationId: submitCheck
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRequest'
+        required: true
+      responses:
+        '202':
+          description: Check queued.
+          headers:
+            Location:
+              description: Status URL of the check, `/api/v1/checks/{id}`.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmitResponse'
+        '422':
+          description: Text is missing, not a string, empty, or longer than the limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: The queue is full. Retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/checks/{check_id}:
+    get:
+      tags:
+      - checks
+      summary: Get the status and results of a check
+      description: Returns the check at once when it is finished or `wait` is 0. Otherwise holds the request
+        until the check finishes or `wait` seconds pass, then returns the current state (long polling).
+      operationId: getCheck
+      parameters:
+      - name: check_id
+        in: path
+        required: true
+        schema:
+          type: string
+          description: Check id returned by `POST /api/v1/checks`.
+          title: Check Id
+        description: Check id returned by `POST /api/v1/checks`.
+      - name: wait
+        in: query
+        required: false
+        schema:
+          type: number
+          minimum: 0
+          description: Seconds to wait for the check to finish. Values above `API_MAX_WAIT_SECONDS` (default
+            30) are lowered to it.
+          default: 0
+          title: Wait
+        description: Seconds to wait for the check to finish. Values above `API_MAX_WAIT_SECONDS` (default
+          30) are lowered to it.
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckStatusResponse'
+        '404':
+          description: No check with this id.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: '`wait` is negative or not a number.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  schemas:
+    CheckStatusResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: UUID of the check.
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - completed
+          - failed
+          title: Status
+          description: '`queued` (waiting), `running` (being analysed), `completed` (results ready) or
+            `failed` (see `error`).'
+        created_at:
+          type: string
+          title: Created At
+          description: Submission time, ISO 8601 UTC.
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+          description: Time the analysis started; `null` while queued.
+        finished_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Finished At
+          description: Time the analysis ended; `null` until then.
+        queue_position:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Queue Position
+          description: 1-based position in the queue while `queued`, otherwise `null`.
+        results:
+          anyOf:
+          - items:
+              $ref: '#/components/schemas/ClaimResult'
+            type: array
+          - type: 'null'
+          title: Results
+          description: One entry per check-worthy claim when `completed` (empty list when the text has
+            no check-worthy claims), otherwise `null`.
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+          description: Short error message when `failed`, otherwise `null`.
+      type: object
+      required:
+      - id
+      - status
+      - created_at
+      - started_at
+      - finished_at
+      - queue_position
+      - results
+      - error
+      title: CheckStatusResponse
+      examples:
+      - created_at: '2026-09-28T01:36:47.909900+00:00'
+        finished_at: '2026-09-28T01:39:41.079260+00:00'
+        id: c874c8b4-f43b-47aa-bb15-b4bed539b6f8
+        results:
+        - citations:
+          - language: en
+            passage_index: 0
+            published_at: '2023-06-12'
+            publisher: apnews.com
+            retrieved_at: '2026-09-28T01:38:44Z'
+            tier: wire_agencies
+            title: Collapse of Kakhovka dam in Ukraine triggers emergency | AP News
+            trust: 0.95
+            url: https://apnews.com/article/russia-ukraine-war-kakhovka-dam-flood-evacuation-eecc9952c2d9f500c38b0a873f69438c
+          claim_text: The Kakhovka dam was destroyed in 2023.
+          component_scores:
+            nli: 0.2112
+            rag: 0.95
+          evidence_excerpts:
+          - passage_index: 0
+            relevance_score: 0.9829
+            stance: supports
+            text: Collapse of Kakhovka dam in Ukraine triggers emergency ...
+          explanation: The claim is supported by 5 evidence passage(s) with an overall confidence score
+            of 0.95.
+          final_score: 0.95
+          language: en
+          processing_metadata:
+            models:
+              llm: qwen3:14b
+            search_queries:
+            - The Kakhovka dam was destroyed in 2023.
+            - Kakhovka dam destruction 2023 news reports fact-checks
+            search_status: ok
+          verdict: CONFIRMED
+        started_at: '2026-09-28T01:36:47.912753+00:00'
+        status: completed
+    Citation:
+      properties:
+        passage_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Passage Index
+          description: Index of the passage this source backs.
+        url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Url
+          description: Address of the source page.
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+          description: Page title.
+        publisher:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Publisher
+          description: Publisher domain, e.g. `apnews.com`.
+        published_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Published At
+          description: Publication date, when known.
+        retrieved_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retrieved At
+          description: Time the page was fetched, ISO 8601 UTC.
+        tier:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tier
+          description: Source-policy tier, e.g. `fact_checkers`, `wire_agencies`.
+        trust:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Trust
+          description: Trust weight of the source, 0-1.
+        language:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Language
+          description: Language of the page.
+      additionalProperties: true
+      type: object
+      title: Citation
+      description: Source of one evidence passage.
+    ClaimResult:
+      properties:
+        claim_text:
+          type: string
+          title: Claim Text
+          description: The claim extracted from the submitted text.
+        verdict:
+          type: string
+          title: Verdict
+          description: '`CONFIRMED` (supported by evidence), `DISINFORMATION` (contradicted by evidence)
+            or `UNCERTAIN` (not enough evidence, or the methods disagree).'
+          examples:
+          - CONFIRMED
+        final_score:
+          type: number
+          title: Final Score
+          description: Truthfulness score from 0 (false) to 1 (true); 0.5 means undecided.
+        explanation:
+          type: string
+          title: Explanation
+          description: Short human-readable explanation of the verdict.
+        component_scores:
+          additionalProperties:
+            type: number
+          type: object
+          title: Component Scores
+          description: 'Scores of the individual methods: `nli` (entailment model) and `rag` (LLM).'
+        evidence_excerpts:
+          items:
+            $ref: '#/components/schemas/EvidenceExcerpt'
+          type: array
+          title: Evidence Excerpts
+          description: Evidence passages used for the verdict.
+        citations:
+          items:
+            $ref: '#/components/schemas/Citation'
+          type: array
+          title: Citations
+          description: Sources of the evidence passages.
+        language:
+          type: string
+          title: Language
+          description: 'Detected language of the claim: `en`, `uk`, `ru` or `zh`.'
+        processing_metadata:
+          additionalProperties: true
+          type: object
+          title: Processing Metadata
+          description: 'Diagnostic details: models used (`models`), search queries (`search_queries`),
+            search status (`search_status`: `ok`, `no_results` or `unavailable`), weights and the reason
+            for an `UNCERTAIN` verdict (`uncertainty_reason`). Keys may change between versions.'
+      additionalProperties: true
+      type: object
+      required:
+      - claim_text
+      - verdict
+      - final_score
+      - explanation
+      - component_scores
+      - evidence_excerpts
+      - citations
+      - language
+      title: ClaimResult
+      description: Verification result for one check-worthy claim found in the text.
+    ErrorResponse:
+      properties:
+        detail:
+          anyOf:
+          - type: string
+          - items:
+              additionalProperties: true
+              type: object
+            type: array
+          title: Detail
+          description: Human-readable error message. For a malformed request body it is a list of validation
+            errors instead.
+          examples:
+          - 'Text is too long: the limit is 20000 characters.'
+      type: object
+      required:
+      - detail
+      title: ErrorResponse
+    EvidenceExcerpt:
+      properties:
+        passage_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Passage Index
+          description: Index of the passage.
+        text:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Text
+          description: Passage text (shortened).
+        relevance_score:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Relevance Score
+          description: Reranker relevance, 0-1.
+        stance:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stance
+          description: 'NLI stance toward the claim: `supports`, `contradicts` or `neutral`.'
+      additionalProperties: true
+      type: object
+      title: EvidenceExcerpt
+      description: One evidence passage and how it relates to the claim.
+    SubmitRequest:
+      properties:
+        text:
+          type: string
+          title: Text
+          description: News text to check, in English, Ukrainian, Russian or Chinese. Leading and trailing
+            whitespace is removed; the rest must be non-empty and at most `API_MAX_TEXT_CHARS` characters
+            (default 20000).
+      type: object
+      required:
+      - text
+      title: SubmitRequest
+      examples:
+      - text: The Kakhovka dam was destroyed on 6 June 2023.
+    SubmitResponse:
+      properties:
+        id:
+          type: string
+          title: Id
+          description: Random UUID of the new check. Use it to fetch the result.
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - completed
+          - failed
+          title: Status
+          description: Always `queued` for a new check.
+        created_at:
+          type: string
+          title: Created At
+          description: Submission time, ISO 8601 UTC.
+      type: object
+      required:
+      - id
+      - status
+      - created_at
+      title: SubmitResponse
+      examples:
+      - created_at: '2026-09-28T01:36:47.909900+00:00'
+        id: c874c8b4-f43b-47aa-bb15-b4bed539b6f8
+        status: queued
+tags:
+- name: checks
+  description: Submit texts and fetch results.

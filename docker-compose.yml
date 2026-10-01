@@ -1,0 +1,104 @@
+# Disinformation Detection System: web app + Ollama + SearXNG.
+#
+#   cp docker/.env.example docker/.env      # then set SEARXNG_SECRET
+#   docker compose --env-file docker/.env up -d --build
+#
+# The demo page is served at http://localhost:${APP_PORT}/ once app is healthy.
+# Requires Docker Compose v2 and the NVIDIA Container Toolkit.
+
+services:
+  searxng:
+    build:
+      context: docker/searxng
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in docker/.env}
+      SEARXNG_IMAGE_PROXY: ${SEARXNG_IMAGE_PROXY:-true}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 2s
+    restart: unless-stopped
+
+  ollama:
+    build:
+      context: docker/ollama
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:14b}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      # Healthy only once the server is up and the model is pulled.
+      test: ["CMD-SHELL", "ollama show \"$$OLLAMA_MODEL\" >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2h
+      start_interval: 10s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    depends_on:
+      searxng:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:14b}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      SEARCH_BASE_URL: ${SEARCH_BASE_URL:-http://searxng:8080}
+      RETRIEVAL_DEVICE: ${RETRIEVAL_DEVICE:-cuda}
+      RETRIEVAL_CACHE_MODE: ${RETRIEVAL_CACHE_MODE:-read_write}
+      SEARCH_MIN_INTERVAL_SECONDS: ${SEARCH_MIN_INTERVAL_SECONDS:-210}
+      SOURCE_POLICY_MODE: ${SOURCE_POLICY_MODE:-strict}
+      LOGGING_LEVEL: ${LOGGING_LEVEL:-INFO}
+      API_MAX_TEXT_CHARS: ${API_MAX_TEXT_CHARS:-20000}
+      API_MAX_QUEUED: ${API_MAX_QUEUED:-20}
+      API_MAX_WAIT_SECONDS: ${API_MAX_WAIT_SECONDS:-30}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - app-hf-models:/models/hf
+      - app-cache:/app/cache
+      - app-logs:/app/logs
+      - app-var:/app/var
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  app-hf-models:
+  app-cache:
+  app-logs:
+  app-var:

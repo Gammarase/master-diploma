@@ -65,15 +65,24 @@ data/datasets/
 #  Jupyter 
 .ipynb_checkpoints/
 *.ipynb
+.jupyter/
+.jupyter_ystore.db
+/jupyter
 
 
 #  Pinecone / Ollama local state 
 pinecone_cache/
 ollama_cache/
 
+#  Web API job database
+var/
+
+#  Web evidence cache (search results + extracted pages)
+cache/
+
 #  AI assistant / planning tooling (local only)
 .claude/
 CLAUDE.md
 CLAUDE.local.md
 openspec/
-docs/
+/docs/

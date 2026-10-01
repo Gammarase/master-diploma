@@ -1,7 +1,7 @@
 """
 Cross-encoder reranking for the Disinformation Detection System.
 
-Rescores vector-search candidates against the claim with a multilingual
+Rescores candidate passages against the claim with a multilingual
 cross-encoder (default ``BAAI/bge-reranker-v2-m3``). Scores are the sigmoid
 of the model logits, so they lie in [0, 1] and can be compared with
 ``retrieval.min_relevance``.
@@ -17,7 +17,7 @@ from exceptions import VectorStoreError
 from logging_config import get_logger
 
 if TYPE_CHECKING:
-    from retrieval.vector_store import RetrievedEvidence
+    from retrieval.evidence import RetrievedEvidence
 
 __all__ = ["Reranker"]
 
@@ -35,7 +35,7 @@ class Reranker:
     """Lazy-loaded cross-encoder reranker.
 
     Disabled when ``retrieval.reranker_model`` is null; ``rerank`` then just
-    orders candidates by their existing (vector similarity) score.
+    orders candidates by their existing score.
 
     Args:
         settings: Application settings providing the reranker model and device.
@@ -43,7 +43,7 @@ class Reranker:
 
     def __init__(self, settings: "Settings") -> None:  # noqa: F821
         self._model_name: str | None = settings.retrieval.reranker_model or None
-        self._device: str = settings.embeddings.device
+        self._device: str = settings.retrieval.device
         self._model: Any | None = None
 
     @property
@@ -86,12 +86,12 @@ class Reranker:
     ) -> list["RetrievedEvidence"]:
         """Rescore *evidences* against *query* and sort by the new score.
 
-        Each returned item keeps its original similarity in ``vector_score``
+        Each returned item keeps its pre-rerank score in ``retrieval_score``
         and carries the reranker score in ``score``.
 
         Args:
             query: The claim text.
-            evidences: Vector-search candidates.
+            evidences: Candidate passages.
 
         Returns:
             New list sorted by score, highest first.

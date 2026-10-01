@@ -1,55 +1,25 @@
 """
 Integration tests for DisinformationDetectionPipeline.
 
-All external services (Pinecone, Ollama) are mocked — no network
+All external services (SearXNG, web pages, Ollama) are mocked — no network
 connections are required to run these tests.
 """
 
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
 
 from claim_extraction.extractor import Claim
+from exceptions import SearchBackendError
 from explainability.explainer import ExplanationOutput
 from pipeline import DisinformationDetectionPipeline, PipelineConfig
-from retrieval.vector_store import RetrievedEvidence
+from retrieval.evidence import RetrievalResult
 from verification.rag_verifier import RAGVerdict
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
-
-_VALID_RAG_JSON = json.dumps({
-    "verdict": "SUPPORTED",
-    "confidence": 0.82,
-    "reasoning": "The evidence strongly supports the claim.",
-    "supporting_evidence_ids": [0],
-    "contradicting_evidence_ids": [],
-})
-
-_TWO_EVIDENCE = [
-    RetrievedEvidence(
-        vector_id="ru22fact-0-en",
-        score=0.92,
-        claim_text="Russia launched missiles.",
-        evidence_text="Russia conducted missile strikes on Ukrainian cities.",
-        label="Supported",
-        language="EN",
-        explanation="Confirmed by multiple sources.",
-    ),
-    RetrievedEvidence(
-        vector_id="ru22fact-1-en",
-        score=0.85,
-        claim_text="Ukraine was attacked.",
-        evidence_text="Ukrainian authorities confirmed the attack.",
-        label="Supported",
-        language="EN",
-        explanation="Official confirmation.",
-    ),
-]
 
 
 def _make_pipeline(settings: MagicMock) -> DisinformationDetectionPipeline:
@@ -58,25 +28,11 @@ def _make_pipeline(settings: MagicMock) -> DisinformationDetectionPipeline:
 
 def _fully_mock_pipeline(
     pipeline: DisinformationDetectionPipeline,
-    mock_pinecone_index: MagicMock,
-    mock_ollama_client: MagicMock,
+    mock_retriever: MagicMock,
 ) -> None:
     """Inject mocked dependencies directly into pipeline internals."""
-    import numpy as np
+    pipeline._retriever = mock_retriever
 
-    # Mock embedder
-    embedder = MagicMock()
-    embedder.embed_single.return_value = [0.0] * 768
-    pipeline._embedder = embedder
-
-    # Mock vector store
-    from retrieval.vector_store import PineconeVectorStore
-
-    store = MagicMock(spec=PineconeVectorStore)
-    store.similarity_search.return_value = _TWO_EVIDENCE
-    pipeline._vector_store = store
-
-    # Mock NLI verifier
     from verification.nli_verifier import NLIResult, NLIVerifier
 
     nli_verifier = MagicMock(spec=NLIVerifier)
@@ -93,7 +49,6 @@ def _fully_mock_pipeline(
     ]
     pipeline._nli_verifier = nli_verifier
 
-    # Mock RAG verifier
     from verification.rag_verifier import RAGVerifier
 
     rag_verifier = MagicMock(spec=RAGVerifier)
@@ -106,7 +61,6 @@ def _fully_mock_pipeline(
     )
     pipeline._rag_verifier = rag_verifier
 
-    # Mock claim extractor
     from claim_extraction.extractor import ClaimExtractor
 
     extractor = MagicMock(spec=ClaimExtractor)
@@ -124,18 +78,22 @@ def _fully_mock_pipeline(
     pipeline._initialized = True
 
 
+@pytest.fixture
+def pipeline(
+    settings: MagicMock, mock_retriever: MagicMock
+) -> DisinformationDetectionPipeline:
+    p = _make_pipeline(settings)
+    _fully_mock_pipeline(p, mock_retriever)
+    return p
+
+
 # ─── Tests ────────────────────────────────────────────────────────────────────
+
 
 class TestPipelineFullFlow:
     def test_analyze_returns_explanation_outputs(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
-
         results = pipeline.analyze(
             "Russia launched 45 missiles at Ukraine. "
             "The attack caused significant civilian casualties."
@@ -145,87 +103,106 @@ class TestPipelineFullFlow:
         assert all(isinstance(r, ExplanationOutput) for r in results)
 
     def test_analyze_returns_valid_verdict(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         results = pipeline.analyze("Russia launched 45 missiles at Ukraine.")
         assert results[0].verdict in {"CONFIRMED", "UNCERTAIN", "DISINFORMATION"}
 
     def test_analyze_empty_text_returns_empty_list(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         assert pipeline.analyze("") == []
         assert pipeline.analyze("   ") == []
 
     def test_analyze_no_claims_returns_empty_list(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
-        # Make extractor return no claims
         pipeline._claim_extractor.extract_claims.return_value = []
-        results = pipeline.analyze("Some text with no claims.")
-        assert results == []
+        assert pipeline.analyze("Some text with no claims.") == []
+
+    def test_top_k_override_reaches_retriever(
+        self, pipeline: DisinformationDetectionPipeline
+    ) -> None:
+        pipeline.analyze("Russia launched 45 missiles.", PipelineConfig(top_k=3))
+        assert pipeline._retriever.retrieve.call_args.kwargs["top_k"] == 3
+
+    def test_pipeline_config_has_no_filter_language(self) -> None:
+        assert not hasattr(PipelineConfig(), "filter_language")
 
 
 class TestAnalyzeSingleClaim:
     def test_returns_explanation_output(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
-        result = pipeline.analyze_single_claim(
-            "Russia launched 45 missiles at Ukraine."
-        )
+        result = pipeline.analyze_single_claim("Russia launched 45 missiles at Ukraine.")
         assert isinstance(result, ExplanationOutput)
 
     def test_claim_text_preserved(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         claim_text = "Russia launched 45 missiles at Ukraine."
-        result = pipeline.analyze_single_claim(claim_text)
-        assert result.claim_text == claim_text
+        assert pipeline.analyze_single_claim(claim_text).claim_text == claim_text
+
+    def test_no_exclude_parameter(
+        self, pipeline: DisinformationDetectionPipeline
+    ) -> None:
+        with pytest.raises(TypeError):
+            pipeline.analyze_single_claim(  # type: ignore[call-arg]
+                "Some claim.", exclude=("test", "622")
+            )
+
+    def test_language_passed_to_retriever(
+        self, pipeline: DisinformationDetectionPipeline
+    ) -> None:
+        pipeline.analyze_single_claim("Росія запустила ракети.", language="uk")
+        call = pipeline._retriever.retrieve.call_args
+        assert call.args[0] == "Росія запустила ракети."
+        assert call.kwargs["language"] == "uk"
+
+    def test_citations_carry_web_sources(
+        self, pipeline: DisinformationDetectionPipeline
+    ) -> None:
+        result = pipeline.analyze_single_claim("Russia launched 45 missiles at Ukraine.")
+        first = result.citations[0]
+        assert first["url"] == "https://apnews.com/article/russia-ukraine-missiles"
+        assert first["publisher"] == "apnews.com"
+        assert first["trust"] == 0.95
+        assert result.processing_metadata["search_status"] == "ok"
+        assert result.processing_metadata["search_backend"] == "searxng"
+
+
+class TestSearchUnavailable:
+    def test_unavailable_gives_uncertain_no_evidence(
+        self, pipeline: DisinformationDetectionPipeline
+    ) -> None:
+        pipeline._retriever.retrieve.return_value = RetrievalResult(
+            evidences=[], status="unavailable", queries=["q"], backend="searxng"
+        )
+        pipeline._nli_verifier.verify_batch.return_value = []
+        pipeline._rag_verifier.verify.return_value = RAGVerdict(
+            verdict="INSUFFICIENT_EVIDENCE",
+            confidence=0.0,
+            reasoning="No evidence passages were retrieved for this claim.",
+        )
+        result = pipeline.analyze_single_claim("Russia launched 45 missiles at Ukraine.")
+        assert result.verdict == "UNCERTAIN"
+        meta = result.processing_metadata
+        assert meta["uncertainty_reason"] == "no_evidence"
+        assert meta["search_status"] == "unavailable"
+        assert "evidence search could not be performed" in result.explanation
+        assert result.citations == []
 
 
 class TestGracefulDegradation:
     def test_ollama_down_does_not_crash_pipeline(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
         from exceptions import OllamaConnectionError
 
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
-
-        # Make RAG verifier raise OllamaConnectionError
         pipeline._rag_verifier.verify.side_effect = OllamaConnectionError(
             "Connection refused"
         )
-
         results = pipeline.analyze("Russia launched 45 missiles at Ukraine.")
-        # Should still return results with neutral RAG score
         assert len(results) >= 1
         assert isinstance(results[0], ExplanationOutput)
 
@@ -236,106 +213,110 @@ class TestGracefulDegradation:
 
 
 class TestHealthCheck:
-    def test_returns_dict_with_pinecone_and_ollama(
-        self, settings: MagicMock
-    ) -> None:
+    def test_returns_searxng_and_ollama(self, settings: MagicMock) -> None:
         pipeline = DisinformationDetectionPipeline(settings=settings)
-
-        with patch("retrieval.vector_store.PineconeVectorStore.connect"), \
-             patch("retrieval.embeddings.EmbeddingModel._load"), \
-             patch("verification.rag_verifier.OllamaClient.health_check", return_value=True):
-
-            # Mock Pinecone client
-            with patch("pinecone.Pinecone") as mock_pc:
-                mock_pc.return_value.list_indexes.return_value = []
-                mock_pc.return_value.Index.return_value = MagicMock()
-                status = pipeline.health_check()
-
-        assert "pinecone" in status
-        assert "ollama" in status
+        with patch(
+            "retrieval.web_search.SearxngBackend.health_check", return_value=True
+        ), patch(
+            "verification.rag_verifier.OllamaClient.health_check", return_value=True
+        ):
+            status = pipeline.health_check()
+        assert status == {"searxng": True, "ollama": True}
 
     def test_returns_false_when_services_down(self, settings: MagicMock) -> None:
         pipeline = DisinformationDetectionPipeline(settings=settings)
-        settings.pinecone.api_key = ""  # Force Pinecone failure
-        status = pipeline.health_check()
-        assert status["pinecone"] is False
+        with patch(
+            "retrieval.web_search.SearxngBackend.health_check",
+            side_effect=SearchBackendError("down"),
+        ), patch(
+            "verification.rag_verifier.OllamaClient.health_check",
+            side_effect=RuntimeError("down"),
+        ):
+            status = pipeline.health_check()
+        assert status == {"searxng": False, "ollama": False}
 
 
-class TestClaimDateAndExclusion:
-    def test_exclude_passed_to_retrieval(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
-    ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
-        pipeline.analyze_single_claim(
-            "Russia launched 45 missiles at Ukraine.",
-            language="en",
-            claim_date="2022-09-19",
-            exclude=("test", "622"),
-        )
-        kwargs = pipeline._vector_store.similarity_search.call_args.kwargs
-        assert kwargs["exclude"] == ("test", "622")
-
+class TestClaimDate:
     def test_claim_date_reaches_rag_verifier(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         pipeline.analyze_single_claim("Some claim text.", claim_date="2022-09-19")
         claim = pipeline._rag_verifier.verify.call_args.args[0]
         assert claim.date == "2022-09-19"
 
-    def test_defaults_without_date_or_exclusion(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+    def test_default_without_date(
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         pipeline.analyze_single_claim("Some claim text.")
-        assert pipeline._vector_store.similarity_search.call_args.kwargs["exclude"] is None
         assert pipeline._rag_verifier.verify.call_args.args[0].date is None
 
     def test_output_has_debug_metadata(
-        self,
-        settings: MagicMock,
-        mock_pinecone_index: MagicMock,
-        mock_ollama_client: MagicMock,
+        self, pipeline: DisinformationDetectionPipeline
     ) -> None:
-        pipeline = _make_pipeline(settings)
-        _fully_mock_pipeline(pipeline, mock_pinecone_index, mock_ollama_client)
         result = pipeline.analyze_single_claim("Russia launched 45 missiles at Ukraine.")
         meta = result.processing_metadata
         for key in (
             "uncertainty_reason", "effective_weights", "rag_model_verdict",
-            "rag_confidence", "rag_raw_response", "evidence_mode", "models",
+            "rag_confidence", "rag_raw_response", "evidence_mode",
+            "search_backend", "search_status", "search_queries",
+            "source_policy_mode", "models",
         ):
             assert key in meta
         assert meta["models"]["reranker"] == "BAAI/bge-reranker-v2-m3"
-        assert meta["evidence_mode"] == "evidence_only"
-        for excerpt in result.evidence_excerpts:
-            assert "label_from_dataset" not in excerpt
+        assert "embeddings" not in meta["models"]
+        assert meta["evidence_mode"] == "web"
+        assert meta["source_policy_mode"] == "strict"
+        for citation in result.citations:
+            assert not {"dataset", "split", "vector_id"} & set(citation)
 
 
 class TestInitialize:
-    def test_reranker_injected_into_vector_store(self, settings: MagicMock) -> None:
-        pipeline = DisinformationDetectionPipeline(settings=settings)
-        with patch("retrieval.vector_store.PineconeVectorStore.connect"), \
-             patch("verification.nli_verifier.NLIVerifier._load_model"), \
-             patch("verification.rag_verifier.OllamaClient.health_check", return_value=True), \
-             patch("pipeline.setup_logging"):
+    def _init(self, pipeline: DisinformationDetectionPipeline) -> MagicMock:
+        with patch(
+            "retrieval.web_search.SearxngBackend.health_check", return_value=True
+        ) as searx_hc, patch(
+            "verification.nli_verifier.NLIVerifier._load_model"
+        ), patch(
+            "verification.rag_verifier.OllamaClient.health_check", return_value=True
+        ), patch("pipeline.setup_logging"):
             pipeline.initialize()
+        return searx_hc
+
+    def test_builds_web_retriever(self, settings: MagicMock) -> None:
+        pipeline = DisinformationDetectionPipeline(settings=settings)
+        searx_hc = self._init(pipeline)
         from retrieval.reranker import Reranker
+        from retrieval.web_retriever import WebEvidenceRetriever
 
         assert isinstance(pipeline._reranker, Reranker)
-        assert pipeline._vector_store._reranker is pipeline._reranker
+        assert isinstance(pipeline._retriever, WebEvidenceRetriever)
+        assert pipeline._retriever._reranker is pipeline._reranker
+        assert pipeline._retriever.backend_name == "searxng"
         assert pipeline._initialized is True
+        searx_hc.assert_called_once()
         # Second call is a no-op.
         pipeline.initialize()
+
+    def test_query_builder_uses_ollama(self, settings: MagicMock) -> None:
+        pipeline = DisinformationDetectionPipeline(settings=settings)
+        self._init(pipeline)
+        assert pipeline._retriever._queries.enabled is True
+
+    def test_read_only_cache_skips_searxng_health_check(
+        self, settings: MagicMock, tmp_path
+    ) -> None:
+        settings.retrieval.cache_mode = "read_only"
+        settings.retrieval.cache_dir = str(tmp_path)
+        pipeline = DisinformationDetectionPipeline(settings=settings)
+        searx_hc = self._init(pipeline)
+        searx_hc.assert_not_called()
+
+    def test_searxng_down_fails_initialize(self, settings: MagicMock) -> None:
+        pipeline = DisinformationDetectionPipeline(settings=settings)
+        with patch(
+            "retrieval.web_search.SearxngBackend.health_check",
+            side_effect=SearchBackendError("enable the json format"),
+        ), patch("pipeline.setup_logging"):
+            with pytest.raises(SearchBackendError, match="json format"):
+                pipeline.initialize()
+        assert pipeline._initialized is False
