@@ -17,6 +17,7 @@ from explainability.explainer import ExplanationOutput
 
 SEARXNG_URL = "http://searxng.test/healthz"
 OLLAMA_URL = "http://ollama.test/api/tags"
+OLLAMA_WEB_URL = "https://ollama-web.test"
 
 
 def make_output(claim: str, verdict: str = "CONFIRMED") -> ExplanationOutput:
@@ -74,7 +75,7 @@ def settings(tmp_path: Path) -> ApiSettings:
 
 @pytest.fixture
 def client(settings: ApiSettings, pipeline: FakePipeline):
-    app = create_app(settings, lambda: pipeline, lambda: (SEARXNG_URL, OLLAMA_URL))
+    app = create_app(settings, lambda: pipeline, lambda: ("searxng", SEARXNG_URL, OLLAMA_URL))
     with TestClient(app) as c:
         yield c
         pipeline.gate.set()  # let a blocked analysis finish before shutdown
@@ -132,7 +133,7 @@ def test_too_long_text_rejected_naming_limit(tmp_path: Path, pipeline: FakePipel
     app = create_app(
         ApiSettings(db_path=str(tmp_path / "c.sqlite")),
         lambda: pipeline,
-        lambda: (SEARXNG_URL, OLLAMA_URL),
+        lambda: ("searxng", SEARXNG_URL, OLLAMA_URL),
     )
     with TestClient(app) as c:
         r = c.post("/api/v1/checks", json={"text": "a" * 20001})
@@ -191,7 +192,7 @@ def test_wait_is_clamped_to_max(tmp_path: Path, pipeline: FakePipeline) -> None:
     settings = ApiSettings(
         db_path=str(tmp_path / "c.sqlite"), max_wait_seconds=0.5, poll_interval_seconds=0.05
     )
-    app = create_app(settings, lambda: pipeline, lambda: (SEARXNG_URL, OLLAMA_URL))
+    app = create_app(settings, lambda: pipeline, lambda: ("searxng", SEARXNG_URL, OLLAMA_URL))
     pipeline.gate.clear()
     with TestClient(app) as c:
         check_id = c.post("/api/v1/checks", json={"text": "x"}).json()["id"]
@@ -260,7 +261,7 @@ def test_failed_response_has_error(client: TestClient) -> None:
 
 
 def test_results_survive_restart(settings: ApiSettings, pipeline: FakePipeline) -> None:
-    urls = lambda: (SEARXNG_URL, OLLAMA_URL)  # noqa: E731
+    urls = lambda: ("searxng", SEARXNG_URL, OLLAMA_URL)  # noqa: E731
     with TestClient(create_app(settings, lambda: pipeline, urls)) as c:
         check_id = submit(c).json()["id"]
         first = wait_status(c, check_id, "completed")
@@ -271,7 +272,7 @@ def test_results_survive_restart(settings: ApiSettings, pipeline: FakePipeline) 
 def test_submission_accepted_while_initializing(settings: ApiSettings) -> None:
     pipeline = FakePipeline()
     pipeline.ready.clear()
-    app = create_app(settings, lambda: pipeline, lambda: (SEARXNG_URL, OLLAMA_URL))
+    app = create_app(settings, lambda: pipeline, lambda: ("searxng", SEARXNG_URL, OLLAMA_URL))
     with TestClient(app) as c:
         r = submit(c)
         assert r.status_code == 202
@@ -288,7 +289,7 @@ def test_submission_accepted_while_initializing(settings: ApiSettings) -> None:
 @pytest.fixture
 def http_calls(monkeypatch: pytest.MonkeyPatch):
     """Route the health probes through an httpx.MockTransport."""
-    state = {"up": {SEARXNG_URL: True, OLLAMA_URL: True}, "calls": []}
+    state = {"up": {SEARXNG_URL: True, OLLAMA_URL: True, OLLAMA_WEB_URL: True}, "calls": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
@@ -320,7 +321,14 @@ def test_health_both_services_up(client: TestClient, http_calls) -> None:
     r = client.get("/api/v1/health")
     assert r.status_code == 200
     body = _wait_ready(client)
-    assert body == {"pipeline": "ready", "last_error": None, "searxng": True, "ollama": True}
+    assert body == {
+        "pipeline": "ready",
+        "last_error": None,
+        "search_backend": "searxng",
+        "search": True,
+        "searxng": True,
+        "ollama": True,
+    }
 
 
 def test_health_one_service_down(client: TestClient, http_calls) -> None:
@@ -334,7 +342,7 @@ def test_health_one_service_down(client: TestClient, http_calls) -> None:
 def test_health_initializing_before_ready(settings: ApiSettings, http_calls) -> None:
     pipeline = FakePipeline()
     pipeline.ready.clear()
-    app = create_app(settings, lambda: pipeline, lambda: (SEARXNG_URL, OLLAMA_URL))
+    app = create_app(settings, lambda: pipeline, lambda: ("searxng", SEARXNG_URL, OLLAMA_URL))
     with TestClient(app) as c:
         time.sleep(0.2)
         body = c.get("/api/v1/health").json()
@@ -342,6 +350,42 @@ def test_health_initializing_before_ready(settings: ApiSettings, http_calls) -> 
         assert body["last_error"] == "ConnectionError: not yet"
         pipeline.ready.set()
         assert _wait_ready(c)["pipeline"] == "ready"
+
+
+def test_health_with_ollama_backend(
+    settings: ApiSettings, pipeline: FakePipeline, http_calls
+) -> None:
+    app = create_app(settings, lambda: pipeline, lambda: ("ollama", OLLAMA_WEB_URL, OLLAMA_URL))
+    with TestClient(app) as c:
+        body = _wait_ready(c)
+    assert body["search_backend"] == "ollama"
+    assert body["search"] is True
+    assert body["searxng"] is None
+    assert body["ollama"] is True
+    assert OLLAMA_WEB_URL in http_calls["calls"]
+    assert SEARXNG_URL not in http_calls["calls"]
+    assert not any("web_search" in url for url in http_calls["calls"])
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("searxng", "http://searx.cfg:8080/healthz"),
+        ("ollama", "https://ollama-web.cfg"),
+    ],
+)
+def test_service_urls_follow_backend(
+    monkeypatch: pytest.MonkeyPatch, backend: str, expected: str
+) -> None:
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.search.backend = backend
+    fake.search.base_url = "http://searx.cfg:8080/"
+    fake.search.ollama_web_url = "https://ollama-web.cfg/"
+    fake.ollama.base_url = "http://llm.cfg:11434"
+    monkeypatch.setattr("configs.get_settings", lambda: fake)
+    assert api_app._service_urls() == (backend, expected, "http://llm.cfg:11434/api/tags")
 
 
 def test_health_probes_are_cached(client: TestClient, http_calls) -> None:

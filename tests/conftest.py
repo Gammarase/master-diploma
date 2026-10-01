@@ -80,6 +80,9 @@ def settings() -> MagicMock:
     s.retrieval.cache_max_age_days = None
     # Web search
     s.search.backend = "searxng"
+    s.search.page_fetcher = "direct"
+    s.search.ollama_web_url = "https://ollama.com"
+    s.search.ollama_api_key = None
     s.search.base_url = "http://localhost:8080"
     s.search.timeout_seconds = 5
     s.search.min_interval_seconds = 0.0

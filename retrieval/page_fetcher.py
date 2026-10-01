@@ -6,13 +6,17 @@ robots.txt, caps the response size, re-checks the source policy on the
 final URL after redirects, and extracts the main article text with
 ``trafilatura``. When a page cannot be used, the search snippet becomes a
 single fallback passage.
+
+In ``ollama`` mode the page text comes from Ollama's hosted web fetch API
+instead of a local download; robots.txt is still checked first, and the
+cache entries are kept apart from the direct fetcher's.
 """
 
 from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -20,6 +24,7 @@ import httpx
 
 from logging_config import get_logger
 from retrieval.cache import utc_now_iso
+from retrieval.web_search import OLLAMA_KEY_ENV, ollama_auth_headers
 
 if TYPE_CHECKING:
     from configs import Settings
@@ -35,6 +40,10 @@ _HTML_TYPES = ("text/html", "application/xhtml+xml")
 STATUS_OK = "ok"
 # Transient failures are not cached, so a later run can retry them.
 _TRANSIENT = "error"
+# Cache-key prefix of pages fetched through Ollama's web fetch API.
+_OLLAMA_CACHE_PREFIX = "ollama:"
+
+FetcherMode = Literal["direct", "ollama"]
 
 
 @dataclass
@@ -119,6 +128,10 @@ class PageFetcher:
         respect_robots: Whether to honour robots.txt.
         cache: Optional page cache; in read-only mode no requests are sent.
         client: Optional preconfigured ``httpx.Client`` (used by tests).
+        mode: ``direct`` downloads pages; ``ollama`` asks Ollama's web fetch
+            API for their text.
+        ollama_api_key: API key for ``ollama`` mode.
+        ollama_web_url: Ollama service URL for ``ollama`` mode.
     """
 
     def __init__(
@@ -130,7 +143,16 @@ class PageFetcher:
         respect_robots: bool = True,
         cache: "WebCache | None" = None,
         client: httpx.Client | None = None,
+        mode: FetcherMode = "direct",
+        ollama_api_key: str | None = None,
+        ollama_web_url: str = "https://ollama.com",
     ) -> None:
+        if mode not in ("direct", "ollama"):
+            raise ValueError(f"Unknown page fetcher mode: {mode!r}")
+        self._mode: FetcherMode = mode
+        self._ollama_key = ollama_api_key or None
+        self._ollama_url = ollama_web_url.rstrip("/")
+        self._auth_warned = False
         self._policy = policy
         self._user_agent = user_agent
         self._max_bytes = max_bytes
@@ -152,6 +174,8 @@ class PageFetcher:
         cache: "WebCache | None" = None,
     ) -> "PageFetcher":
         s = settings.search
+        ollama = s.page_fetcher == "ollama"
+        key = s.ollama_api_key.get_secret_value() if ollama and s.ollama_api_key else None
         return cls(
             policy,
             user_agent=s.user_agent,
@@ -159,7 +183,14 @@ class PageFetcher:
             max_bytes=s.max_page_bytes,
             respect_robots=s.respect_robots,
             cache=cache,
+            mode="ollama" if ollama else "direct",
+            ollama_api_key=key,
+            ollama_web_url=s.ollama_web_url if ollama else "https://ollama.com",
         )
+
+    @property
+    def mode(self) -> FetcherMode:
+        return self._mode
 
     # ── public ──────────────────────────────────────────────────────────────
 
@@ -219,8 +250,11 @@ class PageFetcher:
 
     def _load(self, url: str) -> tuple[str, str, dict[str, str] | None, str]:
         """Return ``(status, final_url, content, retrieved_at)`` for *url*."""
+        # Ollama-fetched pages live under their own key, so a failure of one
+        # fetcher (e.g. a direct 403) never blocks the other.
+        key = _OLLAMA_CACHE_PREFIX + url if self._mode == "ollama" else url
         if self._cache is not None:
-            cached = self._cache.get_page(url)
+            cached = self._cache.get_page(key)
             if cached is not None:
                 return (
                     cached["status"],
@@ -232,9 +266,12 @@ class PageFetcher:
                 return "cache_miss", url, None, ""
 
         retrieved_at = utc_now_iso()
-        status, final_url, content = self._download(url)
+        if self._mode == "ollama":
+            status, final_url, content = self._download_ollama(url)
+        else:
+            status, final_url, content = self._download(url)
         if self._cache is not None and status != _TRANSIENT:
-            self._cache.put_page(url, final_url, status, content, retrieved_at)
+            self._cache.put_page(key, final_url, status, content, retrieved_at)
         return status, final_url, content, retrieved_at
 
     def _download(self, url: str) -> tuple[str, str, dict[str, str] | None]:
@@ -273,6 +310,59 @@ class PageFetcher:
         if content is None:
             return "no_text", final_url, None
         return STATUS_OK, final_url, content
+
+    def _download_ollama(self, url: str) -> tuple[str, str, dict[str, str] | None]:
+        """Get *url*'s text from Ollama's web fetch API.
+
+        The API reports no redirects, so the final URL is the requested one.
+        """
+        if self._respect_robots and not self._robots_allows(url):
+            return "robots_disallowed", url, None
+        if not self._ollama_key:
+            self._warn_auth(f"no Ollama API key is set; set {OLLAMA_KEY_ENV}")
+            return _TRANSIENT, url, None
+        try:
+            response = self._client.post(
+                f"{self._ollama_url}/api/web_fetch",
+                json={"url": url},
+                headers=ollama_auth_headers(self._ollama_key),
+            )
+        except httpx.HTTPError as exc:
+            logger.info("Ollama web fetch of %s failed: %s", url, exc)
+            return _TRANSIENT, url, None
+        if response.status_code in (401, 403):
+            self._warn_auth(
+                f"Ollama rejected the API key (HTTP {response.status_code}); "
+                f"set {OLLAMA_KEY_ENV}"
+            )
+            return _TRANSIENT, url, None
+        if response.status_code >= 400:
+            logger.info(
+                "Ollama web fetch of %s returned HTTP %d.", url, response.status_code
+            )
+            return _TRANSIENT, url, None
+        try:
+            data = response.json()
+        except ValueError:
+            logger.info("Ollama web fetch of %s returned malformed JSON.", url)
+            return _TRANSIENT, url, None
+        if not isinstance(data, dict):
+            logger.info("Ollama web fetch of %s returned a malformed response.", url)
+            return _TRANSIENT, url, None
+        text = str(data.get("content") or "").strip()[: self._max_bytes]
+        if not text:
+            return "no_text", url, None
+        return (
+            STATUS_OK,
+            url,
+            {"text": text, "title": str(data.get("title") or ""), "sitename": "", "date": ""},
+        )
+
+    def _warn_auth(self, message: str) -> None:
+        """Log an API key problem once per fetcher (never the key itself)."""
+        if not self._auth_warned:
+            self._auth_warned = True
+            logger.warning("Ollama web fetch failed: %s.", message)
 
     # ── robots.txt ──────────────────────────────────────────────────────────
 

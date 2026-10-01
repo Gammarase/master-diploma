@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = [
@@ -109,10 +109,31 @@ class RetrievalSettings(BaseSettings):
 
 
 class SearchSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SEARCH_")
+    # Reads .env itself so a plain SEARCH_OLLAMA_API_KEY= line works; the
+    # top-level Settings only understands the nested SEARCH__... form.
+    model_config = SettingsConfigDict(
+        env_prefix="SEARCH_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
-    backend: Literal["searxng"] = Field(
+    backend: Literal["searxng", "ollama"] = Field(
         default=_YAML.get("search", {}).get("backend", "searxng")
+    )
+    page_fetcher: Literal["direct", "ollama"] = Field(
+        default=_YAML.get("search", {}).get("page_fetcher", "direct")
+    )
+    ollama_web_url: str = Field(
+        default=_YAML.get("search", {}).get("ollama_web_url", "https://ollama.com")
+    )
+    # Secret: never read from config.yaml, only from the environment or .env.
+    ollama_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "SEARCH_OLLAMA_API_KEY", "OLLAMA_API_KEY", "ollama_api_key"
+        ),
     )
     base_url: str = Field(
         default=_YAML.get("search", {}).get("base_url", "http://localhost:8080")

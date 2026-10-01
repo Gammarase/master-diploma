@@ -64,7 +64,24 @@ class RetrievalError(DisinfoDetectionError):
 
 
 class SearchBackendError(RetrievalError):
-    """Raised when the search backend is unreachable or misconfigured."""
+    """Raised when the search backend is unreachable or misconfigured.
+
+    Attributes:
+        fatal: True when the remaining requests would fail the same way
+            (e.g. a rejected API key), so the caller should stop sending them.
+    """
+
+    __slots__ = ("fatal",)
+
+    def __init__(
+        self,
+        message: str,
+        original_error: Exception | None = None,
+        *,
+        fatal: bool = False,
+    ) -> None:
+        super().__init__(message, original_error)
+        self.fatal = fatal
 
 
 class VerificationError(DisinfoDetectionError):

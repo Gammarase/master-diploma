@@ -221,7 +221,7 @@ class TestHealthCheck:
             "verification.rag_verifier.OllamaClient.health_check", return_value=True
         ):
             status = pipeline.health_check()
-        assert status == {"searxng": True, "ollama": True}
+        assert status == {"search": True, "searxng": True, "ollama": True}
 
     def test_returns_false_when_services_down(self, settings: MagicMock) -> None:
         pipeline = DisinformationDetectionPipeline(settings=settings)
@@ -233,7 +233,7 @@ class TestHealthCheck:
             side_effect=RuntimeError("down"),
         ):
             status = pipeline.health_check()
-        assert status == {"searxng": False, "ollama": False}
+        assert status == {"search": False, "searxng": False, "ollama": False}
 
 
 class TestClaimDate:

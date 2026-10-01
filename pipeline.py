@@ -37,7 +37,7 @@ class PipelineConfig:
 class DisinformationDetectionPipeline:
     """End-to-end disinformation detection pipeline.
 
-    All heavy components (ML models, SearXNG, Ollama) are lazy-loaded
+    All heavy components (ML models, web search, Ollama) are lazy-loaded
     inside ``initialize()``. The pipeline can be instantiated cheaply
     for testing by never calling ``initialize()``.
 
@@ -60,14 +60,16 @@ class DisinformationDetectionPipeline:
         self._initialized: bool = False
 
     def initialize(self) -> None:
-        """Load all models and connect to SearXNG and Ollama.
+        """Load all models and connect to the search backend and Ollama.
 
         Call this once before using ``analyze()`` or ``analyze_single_claim()``.
 
         Raises:
             RetrievalError: If the source policy file is missing or invalid.
-            SearchBackendError: If SearXNG is unreachable or does not serve
-                the JSON format (skipped when the cache is ``read_only``).
+            SearchBackendError: If the search backend is unreachable, SearXNG
+                does not serve the JSON format, or an Ollama option is selected
+                without ``SEARCH_OLLAMA_API_KEY`` (skipped when the cache is
+                ``read_only``).
             OllamaConnectionError: If the Ollama server is not running.
             NLIError: If the NLI model cannot be loaded.
         """
@@ -91,15 +93,17 @@ class DisinformationDetectionPipeline:
         from retrieval.cache import WebCache
         from retrieval.page_fetcher import PageFetcher
         from retrieval.source_policy import SourcePolicy
-        from retrieval.web_search import SearxngBackend
+        from retrieval.web_search import create_search_backend
 
         policy = SourcePolicy.from_settings(self._settings)
         cache = WebCache.from_settings(self._settings)
-        backend = SearxngBackend.from_settings(self._settings)
+        backend = create_search_backend(self._settings)
         if cache.offline:
-            logger.info("Cache is read_only: skipping the SearXNG health check.")
+            logger.info(
+                "Cache is read_only: skipping the %s health check.", backend.name
+            )
         else:
-            backend.health_check()
+            self._check_search_services(backend)
         fetcher = PageFetcher.from_settings(self._settings, policy, cache)
 
         # NLI verifier
@@ -230,22 +234,55 @@ class DisinformationDetectionPipeline:
         )
         return self._process_claim(claim, PipelineConfig())
 
+    def _check_search_services(self, backend: Any) -> None:
+        """Validate the Ollama key and probe the search services in use.
+
+        Raises:
+            SearchBackendError: When an Ollama option is selected without a
+                key, or a selected service is unreachable.
+        """
+        from exceptions import SearchBackendError
+        from retrieval.web_search import OLLAMA_KEY_ENV, OllamaSearchBackend
+
+        s = self._settings.search
+        uses_ollama_fetch = s.page_fetcher == "ollama"
+        if s.backend == "ollama" or uses_ollama_fetch:
+            key = s.ollama_api_key.get_secret_value() if s.ollama_api_key else ""
+            if not key.strip():
+                raise SearchBackendError(
+                    f"search.backend={s.backend!r} / search.page_fetcher="
+                    f"{s.page_fetcher!r} need an Ollama API key: set "
+                    f"{OLLAMA_KEY_ENV} (get one at https://ollama.com/settings/keys)."
+                )
+        backend.health_check()
+        if uses_ollama_fetch and backend.name != "ollama":
+            OllamaSearchBackend.from_settings(self._settings).health_check()
+
     def health_check(self) -> dict[str, bool]:
         """Check connectivity for all external services.
 
         Returns:
-            Dict with keys ``"searxng"`` and ``"ollama"``, values True/False.
+            Dict with keys ``"search"`` (the configured search backend) and
+            ``"ollama"``, plus ``"searxng"`` when SearXNG is the backend;
+            values True/False.
         """
-        status: dict[str, bool] = {"searxng": False, "ollama": False}
+        status: dict[str, bool] = {"search": False, "ollama": False}
+        searxng_active = self._settings.search.backend == "searxng"
+        if searxng_active:
+            status["searxng"] = False
 
         try:
-            from retrieval.web_search import SearxngBackend
+            from retrieval.web_search import create_search_backend
 
-            status["searxng"] = SearxngBackend.from_settings(
-                self._settings
-            ).health_check()
+            status["search"] = create_search_backend(self._settings).health_check()
         except Exception as exc:
-            logger.warning("SearXNG health check failed: %s", exc)
+            logger.warning(
+                "Search backend (%s) health check failed: %s",
+                self._settings.search.backend,
+                exc,
+            )
+        if searxng_active:
+            status["searxng"] = status["search"]
 
         try:
             from verification.rag_verifier import OllamaClient

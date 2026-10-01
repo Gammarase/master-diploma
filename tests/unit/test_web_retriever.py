@@ -394,6 +394,20 @@ class TestRequestPlan:
         # Clock is frozen at 0: the second request waits the full interval.
         assert sleeps == [1.0]
 
+    def test_ollama_backend_uses_same_interval(self) -> None:
+        sleeps: list[float] = []
+        backend = FakeBackend()
+        backend.name = "ollama"
+        _retriever(
+            backend,
+            queries=["q1", "q2"],
+            sleeps=sleeps,
+            search__site_filter="none",
+            search__min_interval_seconds=210.0,
+        ).retrieve(_CLAIM, "en")
+        assert len(backend.calls) == 2
+        assert sleeps == [210.0]
+
 
 class TestFiltering:
     def test_untrusted_results_never_fetched(self) -> None:
@@ -479,6 +493,28 @@ class TestStatus:
         result = _retriever(backend, queries=["q1", "q2"]).retrieve(_CLAIM, "en")
         assert result.status == "unavailable"
         assert len(backend.calls) == 1  # no further requests after a connection error
+
+    def test_fatal_error_stops_requests(self) -> None:
+        def rejected(q: str, s: list[str] | None) -> SearchResponse:
+            raise SearchBackendError("Ollama rejected the API key (HTTP 401)", fatal=True)
+
+        backend = FakeBackend(rejected)
+        backend.name = "ollama"
+        result = _retriever(
+            backend, queries=["q1", "q2"], search__site_filter="none"
+        ).retrieve(_CLAIM, "en")
+        assert result.status == "unavailable"
+        assert len(backend.calls) == 1
+
+    def test_fatal_error_not_cached(self, tmp_path: Path) -> None:
+        def rejected(q: str, s: list[str] | None) -> SearchResponse:
+            raise SearchBackendError("rejected", fatal=True)
+
+        cache = WebCache(tmp_path)
+        backend = FakeBackend(rejected)
+        backend.name = "ollama"
+        _retriever(backend, cache=cache, search__site_filter="none").retrieve(_CLAIM, "en")
+        assert cache.get_search("ollama", _CLAIM, "en") is None
 
     def test_http_error_keeps_trying(self) -> None:
         calls = {"n": 0}

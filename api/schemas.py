@@ -222,5 +222,8 @@ class ErrorResponse(BaseModel):
 class HealthResponse(BaseModel):
     pipeline: Literal["initializing", "ready"]
     last_error: str | None
-    searxng: bool
+    search_backend: str
+    search: bool
+    # Null when SearXNG is not the active search backend.
+    searxng: bool | None
     ollama: bool

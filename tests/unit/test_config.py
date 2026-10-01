@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import configs
@@ -146,3 +148,79 @@ class TestWebRetrievalSettings:
     ) -> None:
         monkeypatch.setenv("SOURCE_POLICY_MODE", "off")
         assert Settings().source_policy.mode == "off"
+
+
+class TestOllamaSearchSettings:
+    _KEY = "sk-test-0123456789"
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # No real key or project .env may leak into these tests.
+        for name in (
+            "SEARCH_OLLAMA_API_KEY",
+            "OLLAMA_API_KEY",
+            "SEARCH_BACKEND",
+            "SEARCH_PAGE_FETCHER",
+            "SEARCH_OLLAMA_WEB_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.chdir(tmp_path)
+
+    def test_defaults_unchanged(self) -> None:
+        s = SearchSettings()
+        assert s.backend == "searxng"
+        assert s.page_fetcher == "direct"
+        assert s.ollama_web_url == "https://ollama.com"
+        assert s.ollama_api_key is None
+
+    def test_ollama_backend_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SEARCH_BACKEND", "ollama")
+        monkeypatch.setenv("SEARCH_PAGE_FETCHER", "ollama")
+        s = SearchSettings()
+        assert (s.backend, s.page_fetcher) == ("ollama", "ollama")
+
+    def test_unknown_backend_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SEARCH_BACKEND", "bing")
+        with pytest.raises(ValueError, match="searxng.*ollama"):
+            SearchSettings()
+
+    def test_unknown_page_fetcher_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            SearchSettings(page_fetcher="browser")
+
+    def test_key_from_search_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SEARCH_OLLAMA_API_KEY", self._KEY)
+        key = SearchSettings().ollama_api_key
+        assert key is not None and key.get_secret_value() == self._KEY
+
+    def test_key_from_standard_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OLLAMA_API_KEY", self._KEY)
+        key = SearchSettings().ollama_api_key
+        assert key is not None and key.get_secret_value() == self._KEY
+
+    def test_search_env_wins_over_standard(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OLLAMA_API_KEY", "other")
+        monkeypatch.setenv("SEARCH_OLLAMA_API_KEY", self._KEY)
+        key = SearchSettings().ollama_api_key
+        assert key is not None and key.get_secret_value() == self._KEY
+
+    def test_key_from_dotenv(self, tmp_path: Path) -> None:
+        (tmp_path / ".env").write_text(
+            f"SEARCH_OLLAMA_API_KEY={self._KEY}\nUNRELATED_KEY=1\n", encoding="utf-8"
+        )
+        key = SearchSettings().ollama_api_key
+        assert key is not None and key.get_secret_value() == self._KEY
+
+    def test_key_not_read_from_yaml(self) -> None:
+        assert "ollama_api_key" not in configs._YAML.get("search", {})
+
+    def test_key_not_in_string_forms(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SEARCH_OLLAMA_API_KEY", self._KEY)
+        s = Settings()
+        assert s.search.ollama_api_key is not None
+        for text in (str(s), repr(s), str(s.search), s.model_dump_json()):
+            assert self._KEY not in text

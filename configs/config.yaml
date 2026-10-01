@@ -24,7 +24,10 @@ retrieval:
   cache_max_age_days: null     # null = entries never expire
 
 search:
-  backend: "searxng"
+  backend: "searxng"           # searxng | ollama (Ollama hosted web search)
+  page_fetcher: "direct"       # direct | ollama (Ollama hosted web fetch)
+  ollama_web_url: "https://ollama.com"
+  # The Ollama API key is never stored here: set SEARCH_OLLAMA_API_KEY (or OLLAMA_API_KEY)
   base_url: "http://localhost:8080"
   timeout_seconds: 20
   min_interval_seconds: 210     # ~1 search per 3.5 min: Brave refills ~1 search per 3 min (measured 2026-09-27)

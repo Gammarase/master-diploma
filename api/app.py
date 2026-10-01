@@ -67,41 +67,54 @@ def _default_pipeline_factory() -> PipelineLike:
     return DisinformationDetectionPipeline()
 
 
-def _service_urls() -> tuple[str, str]:
-    """Health probe URLs of SearXNG and Ollama, from the pipeline settings."""
+ServiceUrls = tuple[str, str, str]
+
+
+def _service_urls() -> ServiceUrls:
+    """Active search backend name, its probe URL and the Ollama LLM probe URL.
+
+    SearXNG is probed at ``/healthz``; Ollama web search at the root of its
+    web URL. Neither probe runs a search, so no quota is used.
+    """
     from configs import get_settings
 
     s = get_settings()
+    if s.search.backend == "ollama":
+        search_url = s.search.ollama_web_url.rstrip("/")
+    else:
+        search_url = s.search.base_url.rstrip("/") + "/healthz"
     return (
-        s.search.base_url.rstrip("/") + "/healthz",
+        s.search.backend,
+        search_url,
         s.ollama.base_url.rstrip("/") + "/api/tags",
     )
 
 
 class _ServiceHealth:
-    """Reachability of SearXNG and Ollama, cached for ``ttl`` seconds.
+    """Reachability of the search backend and Ollama, cached for ``ttl`` seconds.
 
-    Uses SearXNG's own ``/healthz`` rather than a real search, so probes do
-    not spend upstream engine rate limits.
+    Probes health URLs rather than running a real search, so they do not
+    spend upstream rate limits or search quota.
     """
 
-    def __init__(self, urls: Callable[[], tuple[str, str]], ttl: float) -> None:
+    def __init__(self, urls: Callable[[], ServiceUrls], ttl: float) -> None:
         self._urls = urls
         self._ttl = ttl
-        self._cached: tuple[float, bool, bool] | None = None
+        self._cached: tuple[float, str, bool, bool] | None = None
         self._lock = asyncio.Lock()
 
-    async def get(self) -> tuple[bool, bool]:
+    async def get(self) -> tuple[str, bool, bool]:
+        """Return ``(search_backend, search_up, ollama_up)``."""
         async with self._lock:
             now = time.monotonic()
             if self._cached is None or now - self._cached[0] >= self._ttl:
-                searxng_url, ollama_url = self._urls()
+                backend, search_url, ollama_url = self._urls()
                 async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SECONDS) as client:
-                    searxng, ollama = await asyncio.gather(
-                        _probe(client, searxng_url), _probe(client, ollama_url)
+                    search, ollama = await asyncio.gather(
+                        _probe(client, search_url), _probe(client, ollama_url)
                     )
-                self._cached = (now, searxng, ollama)
-            return self._cached[1], self._cached[2]
+                self._cached = (now, backend, search, ollama)
+            return self._cached[1], self._cached[2], self._cached[3]
 
 
 async def _probe(client: httpx.AsyncClient, url: str) -> bool:
@@ -115,7 +128,7 @@ async def _probe(client: httpx.AsyncClient, url: str) -> bool:
 def create_app(
     settings: ApiSettings | None = None,
     pipeline_factory: Callable[[], PipelineLike] | None = None,
-    service_urls: Callable[[], tuple[str, str]] | None = None,
+    service_urls: Callable[[], ServiceUrls] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -123,8 +136,8 @@ def create_app(
         settings: API settings; read from the environment when None.
         pipeline_factory: Builds the pipeline in the lifespan; defaults to
             ``DisinformationDetectionPipeline``.
-        service_urls: Returns the SearXNG and Ollama health URLs; defaults
-            to the pipeline settings.
+        service_urls: Returns the search backend name, its health URL and the
+            Ollama health URL; defaults to the pipeline settings.
     """
     cfg = settings or ApiSettings()
     factory = pipeline_factory or _default_pipeline_factory
@@ -281,11 +294,13 @@ def create_app(
     @app.get("/api/v1/health", response_model=HealthResponse, include_in_schema=False)
     async def get_health(request: Request) -> HealthResponse:
         worker: CheckWorker | None = getattr(request.app.state, "worker", None)
-        searxng, ollama = await health.get()
+        backend, search, ollama = await health.get()
         return HealthResponse(
             pipeline="ready" if worker and worker.state == "ready" else "initializing",
             last_error=worker.last_error if worker else None,
-            searxng=searxng,
+            search_backend=backend,
+            search=search,
+            searxng=search if backend == "searxng" else None,
             ollama=ollama,
         )
 

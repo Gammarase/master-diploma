@@ -39,6 +39,25 @@ SearXNG setup
   ``search.site_filter`` to ``per_domain`` (more requests) or ``none``
   (open search plus the policy post-filter).
 
+Ollama web search
+-----------------
+* ``search.backend: ollama`` sends the same query strings (``site:`` and
+  ``OR`` included) to Ollama's hosted web search API;
+  ``search.page_fetcher: ollama`` gets page text from its web fetch API.
+  Both need an API key from an Ollama account in ``SEARCH_OLLAMA_API_KEY``
+  (or ``OLLAMA_API_KEY``); it is sent only as a bearer token.
+* At most 10 results per request; the claim language is not sent (the API
+  has no language parameter). The account's usage limits apply, and
+  ``search.min_interval_seconds`` throttles Ollama as it does SearXNG
+  (it can be lowered for Ollama).
+* A rejected key (HTTP 401/403) stops the claim's remaining requests, like
+  a connection error; HTTP 429 counts as one failed request.
+* web_fetch reports no redirects, so the source policy is re-checked on the
+  requested URL only (which already passed it). robots.txt is still read
+  directly from each site before a URL is sent.
+* Queries and page URLs leave the machine for ollama.com. Pages fetched
+  through Ollama are cached apart from directly fetched ones.
+
 Batch runs and reproducibility
 ------------------------------
 Warm the cache first with ``retrieval.cache_mode: read_write``, over
@@ -299,9 +318,12 @@ class WebEvidenceRetriever:
                 except SearchBackendError as exc:
                     logger.warning("Search request failed: %s", exc)
                     any_failed = True
-                    # Connection errors and timeouts would repeat for every
-                    # remaining request, so stop sending them for this claim.
-                    backend_down = isinstance(exc.original_error, httpx.TransportError)
+                    # Connection errors, timeouts and a rejected API key
+                    # would repeat for every remaining request, so stop
+                    # sending them for this claim.
+                    backend_down = exc.fatal or isinstance(
+                        exc.original_error, httpx.TransportError
+                    )
                     continue
                 if response.failed:
                     any_failed = True

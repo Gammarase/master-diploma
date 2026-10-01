@@ -25,7 +25,12 @@ from retrieval.query_builder import QueryBuilder
 from retrieval.reranker import Reranker
 from retrieval.source_policy import SourcePolicy
 from retrieval.web_retriever import WebEvidenceRetriever
-from retrieval.web_search import SearchResponse, SearxngBackend
+from retrieval.web_search import (
+    OllamaSearchBackend,
+    SearchHit,
+    SearchResponse,
+    SearxngBackend,
+)
 from verification.rag_verifier import OllamaClient
 
 pytestmark = pytest.mark.live
@@ -144,3 +149,53 @@ def test_live_retrieval(
         assert len(result.evidences) >= 1
         assert all(policy.allows(ev.source_url) for ev in result.evidences)
         assert all(ev.source_url and ev.publisher for ev in result.evidences)
+
+
+# ── Ollama hosted web search / web fetch ────────────────────────────────────
+
+_OLLAMA_SITES = ["reuters.com", "bbc.com"]
+
+
+@pytest.fixture(scope="module")
+def ollama_key() -> str:
+    key = get_settings().search.ollama_api_key
+    value = key.get_secret_value().strip() if key else ""
+    if not value:
+        pytest.skip("SEARCH_OLLAMA_API_KEY (or OLLAMA_API_KEY) is not set")
+    return value
+
+
+@pytest.fixture(scope="module")
+def ollama_hits(ollama_key: str) -> list[str]:
+    web_url = get_settings().search.ollama_web_url
+    backend = OllamaSearchBackend(ollama_key, web_url)
+    response = backend.search(
+        "Zaporizhzhia nuclear power plant IAEA", "en", 5, sites=_OLLAMA_SITES
+    )
+    print(f"\nOllama query={response.query!r}")
+    for hit in response.hits:
+        print(f"  {hit.rank}: {hit.url}")
+    return [h.url for h in response.hits]
+
+
+def test_ollama_site_restricted_search(ollama_hits: list[str]) -> None:
+    assert ollama_hits, "Ollama web search returned no hits"
+    assert all(_on_domain(u, _OLLAMA_SITES) for u in ollama_hits)
+
+
+def test_ollama_web_fetch(ollama_key: str, ollama_hits: list[str]) -> None:
+    if not ollama_hits:
+        pytest.skip("no search hit to fetch")
+    s = get_settings().search
+    fetcher = PageFetcher(
+        SourcePolicy({"tiers": {"t": {"trust": 1.0, "domains": _OLLAMA_SITES}}}),
+        user_agent=s.user_agent,
+        respect_robots=False,  # the hit's site may disallow generic agents
+        mode="ollama",
+        ollama_api_key=ollama_key,
+        ollama_web_url=s.ollama_web_url,
+    )
+    page = fetcher.fetch(SearchHit(url=ollama_hits[0]))
+    assert page is not None and not page.is_snippet
+    assert page.text.strip()
+    print(f"\nFetched {page.url}: {page.title!r}, {len(page.text)} chars")
