@@ -18,14 +18,26 @@ search:
     SearxEngineCaptcha: 3600
     SearxEngineTooManyRequests: 600
 
+# mojeek and startpage are not listed: upstream marks them `inactive` (they
+# now answer with a JavaScript proof-of-work CAPTCHA that SearXNG cannot
+# solve), so they are never loaded and `disabled: false` has no effect.
 engines:
   - name: bing
     disabled: false
-  - name: mojeek
+  - name: yahoo  # Bing-backed; a fallback while bing is suspended
+    disabled: false
+  - name: google  # best site: support; CAPTCHAs suspend it for an hour at a time
     disabled: false
   - name: qwant
     disabled: false
-  - name: startpage
-    disabled: false
   - name: wikipedia
     disabled: false
+  # Converters and translators in the general category: noise, not evidence.
+  - name: currency
+    disabled: true
+  - name: dictzone
+    disabled: true
+  - name: lingva
+    disabled: true
+  - name: mymemory translated
+    disabled: true

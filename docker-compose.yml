@@ -3,8 +3,13 @@
 #   cp docker/.env.example docker/.env      # then set SEARXNG_SECRET
 #   docker compose --env-file docker/.env up -d --build
 #
+# No NVIDIA GPU? Add -f docker-compose.no-gpu.yml (see that file).
+# A second copy next to this one: pick another project name and port, e.g.
+#   APP_PORT=8001 docker compose -p disinfo2 --env-file docker/.env up -d
+# Each project gets its own network, containers and volumes.
+#
 # The demo page is served at http://localhost:${APP_PORT}/ once app is healthy.
-# Requires Docker Compose v2 and the NVIDIA Container Toolkit.
+# Requires Docker Compose v2 (and, for the GPU setup, the NVIDIA Container Toolkit).
 
 services:
   searxng:
@@ -20,6 +25,7 @@ services:
       retries: 3
       start_period: 30s
       start_interval: 2s
+    networks: [disinfo]
     restart: unless-stopped
 
   ollama:
@@ -45,6 +51,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    networks: [disinfo]
     restart: unless-stopped
 
   app:
@@ -70,6 +77,8 @@ services:
       API_MAX_TEXT_CHARS: ${API_MAX_TEXT_CHARS:-20000}
       API_MAX_QUEUED: ${API_MAX_QUEUED:-20}
       API_MAX_WAIT_SECONDS: ${API_MAX_WAIT_SECONDS:-30}
+      API_BASIC_AUTH_USERNAME: ${API_BASIC_AUTH_USERNAME:-}
+      API_BASIC_AUTH_PASSWORD: ${API_BASIC_AUTH_PASSWORD:-}
       HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - app-hf-models:/models/hf
@@ -94,7 +103,13 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    networks: [disinfo]
     restart: unless-stopped
+
+# Project-scoped (<project>_disinfo): service names like ollama/searxng resolve
+# only inside this stack, so other stacks with the same names cannot collide.
+networks:
+  disinfo: {}
 
 volumes:
   ollama-models:
