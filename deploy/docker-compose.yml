@@ -1,28 +1,21 @@
-# Disinformation Detection System: web app + Ollama + SearXNG.
+# Disinformation Detection System, run from pre-built images on Docker Hub.
+# Needs only this folder (no repository checkout):
 #
-#   cp docker/.env.example docker/.env      # then set SEARXNG_SECRET
-#   docker compose --env-file docker/.env up -d --build
+#   cp .env.example .env        # then set SEARXNG_SECRET
+#   docker compose up -d
 #
-# No NVIDIA GPU? Add -f docker-compose.no-gpu.yml (see that file).
-# A second copy next to this one: pick another project name and port, e.g.
-#   APP_PORT=8001 docker compose -p disinfo2 --env-file docker/.env up -d
-# Each project gets its own network, containers and volumes.
+# No NVIDIA GPU? Use: docker compose -f docker-compose.yml -f docker-compose.no-gpu.yml up -d
+# Update to newer images: docker compose pull && docker compose up -d
 #
 # The demo page is served at http://localhost:${APP_PORT}/ once app is healthy.
 # Requires Docker Compose v2 (and, for the GPU setup, the NVIDIA Container Toolkit).
-#
-# Publish the images (tagged ${IMAGE_NAMESPACE}/disinfo-*:${IMAGE_TAG}) for the
-# pull-only stack in deploy/, after docker login:
-#   docker compose --env-file docker/.env build
-#   docker compose --env-file docker/.env push
+# See README.md in this folder.
 
 services:
   searxng:
     image: ${IMAGE_NAMESPACE:-gammarase}/disinfo-searxng:${IMAGE_TAG:-latest}
-    build:
-      context: docker/searxng
     environment:
-      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in docker/.env}
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?set SEARXNG_SECRET in .env}
       SEARXNG_IMAGE_PROXY: ${SEARXNG_IMAGE_PROXY:-true}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/healthz"]
@@ -36,8 +29,6 @@ services:
 
   ollama:
     image: ${IMAGE_NAMESPACE:-gammarase}/disinfo-ollama:${IMAGE_TAG:-latest}
-    build:
-      context: docker/ollama
     environment:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-qwen3:14b}
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
@@ -63,9 +54,6 @@ services:
 
   app:
     image: ${IMAGE_NAMESPACE:-gammarase}/disinfo-app:${IMAGE_TAG:-latest}
-    build:
-      context: .
-      dockerfile: docker/app/Dockerfile
     depends_on:
       searxng:
         condition: service_healthy
